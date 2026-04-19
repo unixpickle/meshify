@@ -156,8 +156,15 @@ class JobManager:
             output_path=output_path,
             remove_background=not run["settings"].get("keep_background", False),
         )
-        store.update_run(run_id, status="running", current_stage="preprocess", progress=0.0, message="Starting", started=True)
-        run_pipeline(settings, sink)
+        store.update_run(
+            run_id,
+            status="running",
+            current_stage=run["current_stage"],
+            progress=run["progress"],
+            message="Resuming" if run["status"] == "running" else "Starting",
+            started=True,
+        )
+        run_pipeline(settings, sink, previous_run=run)
 
 
 job_manager = JobManager()

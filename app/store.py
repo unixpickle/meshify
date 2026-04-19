@@ -142,7 +142,7 @@ def upsert_stage(
         completed_at = existing["completed_at"] if existing else None
         if started and started_at is None:
             started_at = now
-        if completed:
+        if completed and completed_at is None:
             completed_at = now
         connection.execute(
             """
@@ -186,27 +186,54 @@ def create_asset(
     mime_type: str,
     metadata: dict[str, Any] | None = None,
 ) -> str:
-    asset_id = uuid.uuid4().hex
     now = utc_now()
     with DB_LOCK, get_connection() as connection:
-        connection.execute(
+        storage_path_text = storage_path.as_posix()
+        existing = connection.execute(
             """
-            INSERT INTO assets (
-                id, run_id, stage_key, kind, label, storage_path, mime_type, created_at, metadata_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            SELECT id FROM assets
+            WHERE run_id = ? AND stage_key = ? AND storage_path = ?
+            ORDER BY created_at DESC
+            LIMIT 1
             """,
-            (
-                asset_id,
-                run_id,
-                stage_key,
-                kind,
-                label,
-                storage_path.as_posix(),
-                mime_type,
-                now,
-                json.dumps(metadata or {}),
-            ),
-        )
+            (run_id, stage_key, storage_path_text),
+        ).fetchone()
+        if existing is None:
+            asset_id = uuid.uuid4().hex
+            connection.execute(
+                """
+                INSERT INTO assets (
+                    id, run_id, stage_key, kind, label, storage_path, mime_type, created_at, metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    asset_id,
+                    run_id,
+                    stage_key,
+                    kind,
+                    label,
+                    storage_path_text,
+                    mime_type,
+                    now,
+                    json.dumps(metadata or {}),
+                ),
+            )
+        else:
+            asset_id = existing["id"]
+            connection.execute(
+                """
+                UPDATE assets
+                SET kind = ?, label = ?, mime_type = ?, metadata_json = ?
+                WHERE id = ?
+                """,
+                (
+                    kind,
+                    label,
+                    mime_type,
+                    json.dumps(metadata or {}),
+                    asset_id,
+                ),
+            )
     event_broker.publish("asset.created", run_id)
     return asset_id
 
@@ -237,11 +264,13 @@ def load_run(run_id: str) -> dict[str, Any] | None:
     run["settings"] = json.loads(run.pop("settings_json"))
     run["stages"] = [_row_to_dict(row) for row in stage_rows]
     run["assets"] = []
+    deduped_assets: dict[tuple[str, str], dict[str, Any]] = {}
     for row in asset_rows:
         item = _row_to_dict(row)
         item["metadata"] = json.loads(item.pop("metadata_json") or "{}")
         item["url"] = f"/files/{item['storage_path']}"
-        run["assets"].append(item)
+        deduped_assets[(item["stage_key"], item["storage_path"])] = item
+    run["assets"] = list(deduped_assets.values())
 
     image_assets = [asset for asset in run["assets"] if asset["kind"] == "image"]
     model_assets = [asset for asset in run["assets"] if asset["kind"] == "model"]

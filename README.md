@@ -17,6 +17,8 @@ Single-user web UI for uploading images, running the Hunyuan 3D mesh pipeline, t
 - Python `3.12`
 - `uv`
 - A Hugging Face token with access to the required model files
+- On macOS, Xcode Command Line Tools for compiling the PyTorch extension:
+  `xcode-select --install`
 
 ## Setup
 
@@ -50,6 +52,35 @@ Notes:
 - The `custom_rasterizer` build step above is required for textured runs. On macOS it builds a CPU rasterizer; on CUDA machines it will build the CUDA path when available.
 - The frontend build now expects `node_modules` to exist locally, so run `npm install` once after cloning.
 - If `node` is not on your `PATH`, the build script can still fall back to the Node runtime bundled with the Codex desktop app.
+
+## Build The PyTorch Extension
+
+The texture pipeline depends on Hunyuan's `custom_rasterizer` PyTorch extension. That extension is not installed by `uv sync`; build it explicitly from the active project environment:
+
+```bash
+source .venv/bin/activate
+.venv/bin/python Hunyuan3D-2/hy3dgen/texgen/custom_rasterizer/setup.py install
+```
+
+What this does in this repo:
+
+- On macOS without CUDA, it builds the CPU fallback extension.
+- On CUDA machines, it will include the CUDA rasterizer path when `torch.cuda.is_available()` is true at build time.
+- The vendored `setup.py` already adds Torch's library directory to the extension rpath, so a separate manual `install_name_tool` fix should not be necessary when you build it from this `.venv`.
+
+Rebuild it if any of these change:
+
+- you recreate `.venv`
+- you upgrade or downgrade `torch`
+- you switch Python versions
+- you pull changes under `Hunyuan3D-2/hy3dgen/texgen/custom_rasterizer/`
+
+Quick smoke test:
+
+```bash
+source .venv/bin/activate
+.venv/bin/python -c "import custom_rasterizer_kernel; print('custom_rasterizer ok')"
+```
 
 ## Build The Frontend
 
