@@ -20,7 +20,13 @@ STAGE_DEFINITIONS: list[tuple[str, str]] = [
     ("model_load", "Model Load"),
     ("diffusion", "Diffusion Sampling"),
     ("volume_decode", "Volume Decode"),
-    ("export", "Mesh Export"),
+    ("mesh_export", "White Mesh Export"),
+    ("texture_model_load", "Texture Model Load"),
+    ("delight", "Light Cleanup"),
+    ("uv_unwrap", "UV Unwrap"),
+    ("multiview", "Multiview Paint"),
+    ("texture_bake", "Texture Bake"),
+    ("export", "Textured Mesh Export"),
 ]
 STAGE_ORDER = {key: index for index, (key, _) in enumerate(STAGE_DEFINITIONS, start=1)}
 STAGE_LABELS = {key: label for key, label in STAGE_DEFINITIONS}

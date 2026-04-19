@@ -28,9 +28,9 @@ class EventRecord:
 class EventBroker:
     def __init__(self) -> None:
         self._condition = threading.Condition()
-        self._event_id = 0
+        self._event_id = 1
         self._last_event = EventRecord(
-            event_id=0,
+            event_id=1,
             kind="snapshot",
             run_id=None,
             created_at=utc_now(),
@@ -50,7 +50,7 @@ class EventBroker:
 
     def wait_for_update(self, since: int, timeout: float) -> dict[str, object]:
         with self._condition:
-            if since == 0:
+            if since == 0 or since > self._event_id:
                 return {
                     "event_id": self._event_id,
                     "changed": True,

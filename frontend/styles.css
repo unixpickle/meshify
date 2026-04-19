@@ -271,6 +271,7 @@ button:disabled {
 }
 
 .run-card {
+  display: grid;
   overflow: hidden;
   border-radius: var(--radius-lg);
   cursor: pointer;
@@ -501,6 +502,27 @@ button:disabled {
 
   .history-scroll {
     max-height: none;
+  }
+}
+
+@media (min-width: 960px) {
+  .run-card {
+    grid-template-columns: 220px minmax(0, 1fr);
+    align-items: stretch;
+  }
+
+  .run-thumb {
+    aspect-ratio: 1 / 1;
+    height: 100%;
+  }
+
+  .run-body {
+    align-content: center;
+    padding: 18px 20px;
+  }
+
+  .run-topline {
+    justify-content: space-between;
   }
 }
 

@@ -16,8 +16,16 @@ node_modules/
 # Model and package caches
 .hf/
 
-# Upstream editable dependency checkout
-Hunyuan3D-2/
+# Vendored upstream dependency build junk
+Hunyuan3D-2/.git/
+Hunyuan3D-2/**/__pycache__/
+Hunyuan3D-2/**/*.pyc
+Hunyuan3D-2/**/*.so
+Hunyuan3D-2/**/build/
+Hunyuan3D-2/**/*.egg-info/
+Hunyuan3D-2/assets/
+Hunyuan3D-2/docs/
+Hunyuan3D-2/examples/
 tools/typescript/
 
 # Runtime app state

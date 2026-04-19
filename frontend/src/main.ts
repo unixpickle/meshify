@@ -537,7 +537,7 @@ function createDetailShell(): void {
         </div>
         <div class="panel">
           <h2>Stage Outputs</h2>
-          <p class="muted">Image stages show their generated images, and the export stage exposes the GLB in a 3D viewer.</p>
+          <p class="muted">Each stage can publish images or meshes, including paint guides, texture maps, the white mesh, and the final textured GLB.</p>
           <div data-role="asset-groups-host"></div>
         </div>
       </section>
@@ -748,7 +748,7 @@ function syncAssetGroups(run: Run): void {
     host.innerHTML = `
       <section class="empty-state">
         <strong>No stage assets yet.</strong>
-        <p class="muted">As the pipeline runs, processed images and the final 3D mesh will appear here.</p>
+        <p class="muted">As the pipeline runs, guide images, texture assets, and mesh exports will appear here.</p>
       </section>
     `;
     return;

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import mimetypes
 import shutil
 from pathlib import Path
@@ -30,6 +31,8 @@ app.add_middleware(
 
 @app.on_event("startup")
 def startup() -> None:
+    if not logging.getLogger().handlers:
+        logging.basicConfig(level=logging.INFO)
     config.ensure_directories()
     init_db()
     job_manager.start()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import queue
 import threading
 from pathlib import Path
@@ -8,9 +9,15 @@ from . import config, store
 from .mesh_pipeline import PipelineSettings, StageSink, run_pipeline
 
 
+logger = logging.getLogger(__name__)
+
+
 class DatabaseStageSink(StageSink):
     def __init__(self, run_id: str):
         self.run_id = run_id
+        self._last_logged_progress: dict[str, int] = {}
+        self._last_logged_message: dict[str, str | None] = {}
+        self._last_logged_status: dict[str, str] = {}
 
     def stage(
         self,
@@ -48,6 +55,25 @@ class DatabaseStageSink(StageSink):
             started=True,
             completed=completed,
         )
+        progress_bucket = int(progress * 100)
+        should_log = (
+            self._last_logged_status.get(stage_key) != status
+            or self._last_logged_progress.get(stage_key) != progress_bucket
+            or self._last_logged_message.get(stage_key) != message
+            or status in {"completed", "failed"}
+        )
+        if should_log:
+            logger.info(
+                "run=%s stage=%s status=%s progress=%s%% message=%s",
+                self.run_id,
+                stage_key,
+                status,
+                progress_bucket,
+                message or "",
+            )
+            self._last_logged_status[stage_key] = status
+            self._last_logged_progress[stage_key] = progress_bucket
+            self._last_logged_message[stage_key] = message
 
     def asset(
         self,
@@ -122,7 +148,7 @@ class JobManager:
 
         output_dir = config.RUNS_DIR / run_id
         output_dir.mkdir(parents=True, exist_ok=True)
-        output_path = output_dir / "mesh.glb"
+        output_path = output_dir / "textured_mesh.glb"
 
         sink = DatabaseStageSink(run_id)
         settings = PipelineSettings(

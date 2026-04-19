@@ -7,6 +7,7 @@ Single-user web UI for uploading images, running the Hunyuan 3D mesh pipeline, t
 - Frontend: TypeScript browser app in `frontend/src`
 - Backend: FastAPI app in `app/main.py`
 - Pipeline: shared Hunyuan runner in `app/mesh_pipeline.py`
+- Vendored upstream dependency: patched `hy3dgen` source in `Hunyuan3D-2/`
 - Database: local SQLite database in `data/meshify.sqlite3`
 - Assets: uploaded and generated files in `data/storage`
 
@@ -16,13 +17,6 @@ Single-user web UI for uploading images, running the Hunyuan 3D mesh pipeline, t
 - Python `3.12`
 - `uv`
 - A Hugging Face token with access to the required model files
-- A local checkout of Tencent Hunyuan 3D at `Hunyuan3D-2/`
-
-Clone the upstream dependency into this folder name before syncing Python dependencies:
-
-```bash
-git clone https://github.com/Tencent-Hunyuan/Hunyuan3D-2.git Hunyuan3D-2
-```
 
 ## Setup
 
@@ -32,8 +26,15 @@ Create and populate the virtual environment:
 uv venv --python 3.12 .venv
 source .venv/bin/activate
 uv sync
+.venv/bin/python Hunyuan3D-2/hy3dgen/texgen/custom_rasterizer/setup.py install
 npm install
 ```
+
+`Hunyuan3D-2/` is already vendored in this repo. It is based on upstream commit `f8db630` with local patches for:
+
+- MPS-aware texture model execution on macOS
+- CPU-only `custom_rasterizer` builds when CUDA is unavailable
+- progress callback support in the relight stage
 
 Set the runtime environment variables in your shell:
 
@@ -46,6 +47,7 @@ export HF_HUB_DISABLE_XET=1
 Notes:
 
 - `HF_HUB_DISABLE_XET=1` is important here. The full `Hunyuan3D-2.1` download failed with `416 Range Not Satisfiable` without it in this workspace.
+- The `custom_rasterizer` build step above is required for textured runs. On macOS it builds a CPU rasterizer; on CUDA machines it will build the CUDA path when available.
 - The frontend build now expects `node_modules` to exist locally, so run `npm install` once after cloning.
 - If `node` is not on your `PATH`, the build script can still fall back to the Node runtime bundled with the Codex desktop app.
 
@@ -109,8 +111,8 @@ python run_hunyuan3d_watch.py
 - Stores run state, stages, and assets in SQLite
 - Processes heavy mesh jobs through a single background worker
 - Shows the full stage timeline for each run:
-  `Uploaded`, `Background Removal`, `Model Load`, `Diffusion Sampling`, `Volume Decode`, `Mesh Export`
-- Displays stage outputs including images and the final `glb`
+  `Uploaded`, `Background Removal`, `Model Load`, `Diffusion Sampling`, `Volume Decode`, `White Mesh Export`, `Texture Model Load`, `Light Cleanup`, `UV Unwrap`, `Multiview Paint`, `Texture Bake`, `Textured Mesh Export`
+- Displays stage outputs including guide images, texture assets, the white mesh, and the final textured `glb`
 - Uses server-driven long polling so clients update on status changes without fixed-interval refreshes
 
 ## Important Paths
@@ -135,7 +137,6 @@ This repo intentionally does not commit:
 - `node_modules`
 - SQLite runtime state
 - uploaded/generated assets
-- the local `Hunyuan3D-2/` checkout
 - vendored TypeScript tool binaries
 
 That means a fresh clone should follow the setup steps above before the app is runnable.
