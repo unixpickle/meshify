@@ -1,0 +1,11 @@
+{
+  "name": "meshify-control-room",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:frontend": "node node_modules/typescript/lib/tsc.js -p frontend/tsconfig.json && cp frontend/index.html frontend/styles.css frontend/dist/"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3"
+  }
+}

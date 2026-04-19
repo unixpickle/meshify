@@ -1,0 +1,27 @@
+accelerate
+diffusers
+einops
+fastapi
+gradio
+hf-transfer
+huggingface-hub
+ninja
+numpy
+omegaconf
+onnxruntime
+opencv-python
+pillow
+pybind11
+pygltflib
+pymeshlab
+python-multipart
+rembg
+safetensors
+torch
+torchvision
+transformers
+trimesh
+tqdm
+uvicorn
+xatlas
+-e ./Hunyuan3D-2
