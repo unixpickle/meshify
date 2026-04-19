@@ -136,6 +136,49 @@ export HF_HUB_DISABLE_XET=1
 python run_hunyuan3d_watch.py
 ```
 
+## Migrate To Another Machine
+
+To avoid redownloading model weights, copy the local Hugging Face cache from this repo to the same path on the destination machine:
+
+- `.hf/`
+
+The important cached model repos inside it are:
+
+- `.hf/hub/models--tencent--Hunyuan3D-2`
+- `.hf/hub/models--tencent--Hunyuan3D-2.1`
+
+Optional:
+
+- copy `data/` if you also want to preserve existing runs, SQLite state, uploaded images, and generated meshes
+- do not copy `.venv` or `node_modules`; rebuild those on the destination machine
+
+Suggested migration flow:
+
+```bash
+git clone <your-repo-url>
+cd meshify
+
+# copy .hf/ from the source machine into this repo root
+
+uv venv --python 3.12 .venv
+source .venv/bin/activate
+uv sync
+.venv/bin/python Hunyuan3D-2/hy3dgen/texgen/custom_rasterizer/setup.py install
+npm install
+
+export HF_TOKEN=your_token_here
+export HF_HUB_ENABLE_HF_TRANSFER=1
+export HF_HUB_DISABLE_XET=1
+
+scripts/build_frontend.sh
+uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+Notes:
+
+- Even if you copy `.hf/`, rebuild `custom_rasterizer` on the new machine. The model cache is portable; the compiled extension is not.
+- The app defaults `HF_HOME` to this repo-local `.hf/` directory unless you override it with an environment variable.
+
 ## What The App Does
 
 - Queues an image upload immediately
