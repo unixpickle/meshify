@@ -28,7 +28,11 @@ type ModelViewerElement = HTMLElement & {
 type RouteState = {
   runId: string;
   homeScrollY: number;
+  homeVisibleCount: number;
 };
+
+const INITIAL_HOME_RUNS = 24;
+const HOME_RUNS_BATCH = 24;
 
 const state = {
   runs: [] as Run[],
@@ -42,10 +46,13 @@ const state = {
   lastStageSignature: "",
   lastAssetPanelSignature: "",
   homeScrollY: 0,
+  homeVisibleCount: INITIAL_HOME_RUNS,
 };
 
 let pollGeneration = 0;
 let pollController: AbortController | null = null;
+let runListObserver: IntersectionObserver | null = null;
+let homeScrollSyncFrame = 0;
 
 const refs = {
   homeView: null as HTMLElement | null,
@@ -59,6 +66,7 @@ const refs = {
   refreshButton: null as HTMLButtonElement | null,
   uploadError: null as HTMLSpanElement | null,
   runList: null as HTMLDivElement | null,
+  runListLoader: null as HTMLDivElement | null,
   detailHost: null as HTMLElement | null,
 };
 
@@ -159,6 +167,8 @@ function readRouteState(): RouteState {
   return {
     runId: typeof current?.runId === "string" ? current.runId : "",
     homeScrollY: typeof current?.homeScrollY === "number" ? current.homeScrollY : state.homeScrollY,
+    homeVisibleCount:
+      typeof current?.homeVisibleCount === "number" ? current.homeVisibleCount : state.homeVisibleCount,
   };
 }
 
@@ -171,13 +181,79 @@ function writeScrollPosition(top: number): void {
 function updateLocation(runId: string, push: boolean): void {
   const nextUrl = runId ? `${window.location.pathname}#run/${runId}` : window.location.pathname;
   const method = push ? "pushState" : "replaceState";
-  window.history[method]({ runId, homeScrollY: state.homeScrollY }, "", nextUrl);
+  window.history[method](
+    {
+      runId,
+      homeScrollY: state.homeScrollY,
+      homeVisibleCount: state.homeVisibleCount,
+    },
+    "",
+    nextUrl,
+  );
+}
+
+function syncHomeViewportState(): void {
+  if (state.selectedRunId) {
+    return;
+  }
+  const nextScrollY = window.scrollY;
+  if (Math.abs(nextScrollY - state.homeScrollY) < 1) {
+    return;
+  }
+  state.homeScrollY = nextScrollY;
+  updateLocation("", false);
+}
+
+function queueHomeScrollStateSync(): void {
+  if (homeScrollSyncFrame) {
+    return;
+  }
+  homeScrollSyncFrame = window.requestAnimationFrame(() => {
+    homeScrollSyncFrame = 0;
+    syncHomeViewportState();
+  });
+}
+
+function visibleHomeRunCount(): number {
+  return Math.min(state.runs.length, Math.max(state.homeVisibleCount, INITIAL_HOME_RUNS));
+}
+
+function loadMoreHomeRuns(): void {
+  const currentCount = visibleHomeRunCount();
+  if (currentCount >= state.runs.length) {
+    return;
+  }
+  state.homeVisibleCount = Math.min(state.runs.length, currentCount + HOME_RUNS_BATCH);
+  syncRunList();
+  updateLocation(state.selectedRunId, false);
+}
+
+function reconnectRunListObserver(): void {
+  if (!refs.runListLoader || !("IntersectionObserver" in window)) {
+    return;
+  }
+  if (!runListObserver) {
+    runListObserver = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          loadMoreHomeRuns();
+        }
+      },
+      {
+        root: null,
+        rootMargin: "0px 0px 480px 0px",
+      },
+    );
+  }
+  runListObserver.disconnect();
+  if (!refs.runListLoader.hidden) {
+    runListObserver.observe(refs.runListLoader);
+  }
 }
 
 function navigateToRun(runId: string, push = true): void {
   if (!state.selectedRunId) {
-    state.homeScrollY = window.scrollY;
-    updateLocation("", false);
+    syncHomeViewportState();
   }
   if (state.selectedRunId === runId) {
     if (push) {
@@ -257,6 +333,7 @@ function createShell(): void {
             <h2>Models</h2>
             <p class="muted">Every run is listed here. Click one to open its stage details and outputs.</p>
             <div class="run-list" data-role="run-list"></div>
+            <div class="run-list-loader muted" data-role="run-list-loader" hidden></div>
           </section>
         </section>
       </section>
@@ -276,6 +353,7 @@ function createShell(): void {
   refs.refreshButton = app.querySelector('[data-role="refresh-button"]');
   refs.uploadError = app.querySelector('[data-role="upload-error"]');
   refs.runList = app.querySelector('[data-role="run-list"]');
+  refs.runListLoader = app.querySelector('[data-role="run-list-loader"]');
   refs.detailHost = app.querySelector('[data-role="detail-host"]');
 
   refs.uploadForm?.addEventListener("submit", onUploadSubmit);
@@ -284,6 +362,7 @@ function createShell(): void {
     void reloadRunsNow();
     restartLongPolling();
   });
+  reconnectRunListObserver();
 }
 
 function syncSummary(): void {
@@ -354,9 +433,11 @@ function updateRunCard(element: HTMLElement, run: Run): void {
         if (existingImage.src !== new URL(run.preview_image_url, window.location.origin).toString()) {
           existingImage.src = run.preview_image_url;
         }
+        existingImage.loading = "lazy";
+        existingImage.decoding = "async";
         existingImage.alt = run.original_name;
       } else {
-        thumb.innerHTML = `<img src="${run.preview_image_url}" alt="${escapeHtml(run.original_name)}" />`;
+        thumb.innerHTML = `<img src="${run.preview_image_url}" alt="${escapeHtml(run.original_name)}" loading="lazy" decoding="async" />`;
       }
     } else {
       thumb.innerHTML = "";
@@ -379,8 +460,9 @@ function updateRunCard(element: HTMLElement, run: Run): void {
 }
 
 function syncRunList(): void {
-  if (!refs.runList) return;
+  if (!refs.runList || !refs.runListLoader) return;
   const container = refs.runList;
+  const loader = refs.runListLoader;
   const existing = new Map<string, HTMLElement>();
   container.querySelectorAll<HTMLElement>(".run-card[data-run-id]").forEach((element) => {
     existing.set(element.dataset.runId ?? "", element);
@@ -393,13 +475,17 @@ function syncRunList(): void {
         <p class="muted">The global run history will appear here once the first image is submitted.</p>
       </section>
     `;
+    loader.hidden = true;
+    loader.textContent = "";
+    runListObserver?.disconnect();
     return;
   }
 
   container.querySelector(".empty-state")?.remove();
 
-  for (const run of state.runs) {
-    const index = state.runs.indexOf(run);
+  const visibleRuns = state.runs.slice(0, visibleHomeRunCount());
+
+  visibleRuns.forEach((run, index) => {
     let element = existing.get(run.id);
     if (!element) {
       element = createRunCard(run);
@@ -407,11 +493,18 @@ function syncRunList(): void {
     updateRunCard(element, run);
     placeChild(container, element, index);
     existing.delete(run.id);
-  }
+  });
 
   for (const stale of existing.values()) {
     stale.remove();
   }
+
+  const hasMoreRuns = visibleRuns.length < state.runs.length;
+  loader.hidden = !hasMoreRuns;
+  loader.textContent = hasMoreRuns
+    ? `Showing ${visibleRuns.length} of ${state.runs.length} runs. Scroll for more.`
+    : "";
+  reconnectRunListObserver();
 }
 
 function createDetailShell(): void {
@@ -836,6 +929,7 @@ function onFileInputChange(event: Event): void {
 function syncRouteFromLocation(): void {
   const routeState = readRouteState();
   state.homeScrollY = routeState.homeScrollY;
+  state.homeVisibleCount = routeState.homeVisibleCount;
   state.selectedRunId = currentRunIdFromLocation();
   resetDetailCache();
   syncUI();
@@ -888,13 +982,22 @@ function restartLongPolling(): void {
 async function boot(): Promise<void> {
   createShell();
   window.history.scrollRestoration = "manual";
-  state.homeScrollY = readRouteState().homeScrollY;
+  const routeState = readRouteState();
+  state.homeScrollY = routeState.homeScrollY;
+  state.homeVisibleCount = routeState.homeVisibleCount;
   state.selectedRunId = currentRunIdFromLocation();
   updateLocation(state.selectedRunId, false);
   syncUI();
   window.addEventListener("popstate", () => {
     syncRouteFromLocation();
   });
+  window.addEventListener(
+    "scroll",
+    () => {
+      queueHomeScrollStateSync();
+    },
+    { passive: true },
+  );
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible") {
       restartLongPolling();

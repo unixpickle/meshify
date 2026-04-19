@@ -265,6 +265,11 @@ button:disabled {
   margin-top: 18px;
 }
 
+.run-list-loader {
+  padding: 14px 4px 2px;
+  text-align: center;
+}
+
 .run-card {
   overflow: hidden;
   border-radius: var(--radius-lg);
