@@ -51,7 +51,7 @@ Notes:
 - `HF_HUB_DISABLE_XET=1` is important here. The full `Hunyuan3D-2.1` download failed with `416 Range Not Satisfiable` without it in this workspace.
 - The `custom_rasterizer` build step above is required for textured runs. On macOS it builds a CPU rasterizer; on CUDA machines it will build the CUDA path when available.
 - The frontend build now expects `node_modules` to exist locally, so run `npm install` once after cloning.
-- If `node` is not on your `PATH`, the build script can still fall back to the Node runtime bundled with the Codex desktop app.
+- The frontend build expects `node` to be available on your `PATH` unless you set `NODE_BIN` explicitly.
 
 ## Build The PyTorch Extension
 

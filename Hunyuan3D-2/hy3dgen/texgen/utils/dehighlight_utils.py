@@ -23,18 +23,20 @@ class Light_Shadow_Remover():
     def __init__(self, config):
         self.config = config
         self.device = config.device
+        self.inference_device = self.device if self.device == "cuda" else "cpu"
+        self.dtype = torch.float16 if self.inference_device == "cuda" else torch.float32
         self.cfg_image = 1.5
         self.cfg_text = 1.0
 
         pipeline = StableDiffusionInstructPix2PixPipeline.from_pretrained(
             config.light_remover_ckpt_path,
-            torch_dtype=torch.float16,
+            torch_dtype=self.dtype,
             safety_checker=None,
         )
         pipeline.scheduler = EulerAncestralDiscreteScheduler.from_config(pipeline.scheduler.config)
         pipeline.set_progress_bar_config(disable=True)
 
-        self.pipeline = pipeline.to(self.device, torch.float16)
+        self.pipeline = pipeline.to(self.inference_device, self.dtype)
     
     def recorrect_rgb(self, src_image, target_image, alpha_channel, scale=0.95):
         
@@ -81,11 +83,11 @@ class Light_Shadow_Remover():
             image_array[:, :, 3] = alpha_channel
             image = Image.fromarray(image_array)
 
-            image_tensor = torch.from_numpy(np.asarray(image, dtype=np.float32) / 255.0).to(self.device)
+            image_tensor = torch.from_numpy(np.asarray(image, dtype=np.float32) / 255.0).to(self.inference_device)
             alpha = image_tensor[:, :, 3:]
             rgb_target = image_tensor[:, :, :3]
         else:
-            image_tensor = torch.from_numpy(np.asarray(image, dtype=np.float32) / 255.0).to(self.device)
+            image_tensor = torch.from_numpy(np.asarray(image, dtype=np.float32) / 255.0).to(self.inference_device)
             alpha = torch.ones_like(image_tensor)[:, :, :1]
             rgb_target = image_tensor[:, :, :3]
 
@@ -116,7 +118,7 @@ class Light_Shadow_Remover():
         if progress_callback is not None:
             progress_callback(0.9, "Rebalancing relit colors")
 
-        image_tensor = torch.from_numpy(np.asarray(image, dtype=np.float32) / 255.0).to(self.device)
+        image_tensor = torch.from_numpy(np.asarray(image, dtype=np.float32) / 255.0).to(self.inference_device)
         rgb_src = image_tensor[:,:,:3]
         image = self.recorrect_rgb(rgb_src, rgb_target, alpha)
         image = image[:,:,:3]*image[:,:,3:] + torch.ones_like(image[:,:,:3])*(1.0-image[:,:,3:])

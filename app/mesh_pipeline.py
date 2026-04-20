@@ -184,12 +184,34 @@ def load_texture_tensor(texture_path: Path, device: str) -> torch.Tensor:
     return torch.from_numpy(texture_array).to(device)
 
 
+def ensure_mesh_has_uvs(mesh, *, context: str) -> None:
+    uv = getattr(getattr(mesh, "visual", None), "uv", None)
+    if uv is None:
+        raise RuntimeError(f"{context} is missing UV coordinates")
+
+
+def prepare_uv_mesh_for_export(mesh):
+    ensure_mesh_has_uvs(mesh, context="UV mesh before export")
+    placeholder_texture = Image.new("RGB", (2, 2), (255, 255, 255))
+    material = trimesh.visual.texture.SimpleMaterial(
+        image=placeholder_texture,
+        diffuse=(255, 255, 255),
+    )
+    mesh.visual = trimesh.visual.TextureVisuals(
+        uv=mesh.visual.uv,
+        image=placeholder_texture,
+        material=material,
+    )
+    return mesh
+
+
 def _uv_wrap_worker(input_mesh_path: str, output_mesh_path: str, result_conn) -> None:
     try:
         from hy3dgen.texgen.utils.uv_warp_utils import mesh_uv_wrap
 
         mesh = load_mesh_file(Path(input_mesh_path))
         wrapped_mesh = mesh_uv_wrap(mesh)
+        wrapped_mesh = prepare_uv_mesh_for_export(wrapped_mesh)
         wrapped_mesh.export(output_mesh_path)
         result_conn.send({"status": "ok"})
     except Exception as exc:  # pragma: no cover - defensive subprocess handling
@@ -498,6 +520,7 @@ def run_pipeline(settings: PipelineSettings, sink: StageSink, previous_run: dict
     texture_pipeline.config.delight_steps = settings.texgen_delight_steps
     texture_pipeline.config.multiview_steps = settings.texgen_multiview_steps
     sink.stage("texture_model_load", status="completed", progress=1.0, message=f"Paint models ready on {device}")
+    relight_input = texture_pipeline.recenter_image(prepared_image)
 
     if stage_can_resume("delight", delighted_path):
         delighted_image = load_image_file(delighted_path, "RGB")
@@ -522,7 +545,7 @@ def run_pipeline(settings: PipelineSettings, sink: StageSink, previous_run: dict
         )
         delight_started_at = time.monotonic()
         delighted_image = texture_pipeline.models["delight_model"](
-            prepared_image,
+            relight_input,
             progress_callback=update_delight_stage,
         )
         logger.info(
@@ -539,21 +562,29 @@ def run_pipeline(settings: PipelineSettings, sink: StageSink, previous_run: dict
         )
         sink.stage("delight", status="completed", progress=1.0, message="Lighting cleaned")
 
+    reusable_uv_mesh = False
     if stage_can_resume("uv_unwrap", uv_mesh_path):
         textured_mesh_input = load_mesh_file(uv_mesh_path)
-        texture_pipeline.render.load_mesh(textured_mesh_input)
-        sink.asset(
-            "uv_unwrap",
-            kind="model",
-            label="UV Mesh",
-            path=uv_mesh_path,
-            mime_type="model/gltf-binary",
-        )
-        sink.stage("uv_unwrap", status="completed", progress=1.0, message="Reused UV unwrap")
-    else:
+        uv = getattr(getattr(textured_mesh_input, "visual", None), "uv", None)
+        reusable_uv_mesh = uv is not None
+        if reusable_uv_mesh:
+            texture_pipeline.render.load_mesh(textured_mesh_input)
+            sink.asset(
+                "uv_unwrap",
+                kind="model",
+                label="UV Mesh",
+                path=uv_mesh_path,
+                mime_type="model/gltf-binary",
+            )
+            sink.stage("uv_unwrap", status="completed", progress=1.0, message="Reused UV unwrap")
+        else:
+            logger.warning("Discarding UV mesh without UV coordinates: %s", uv_mesh_path)
+
+    if not reusable_uv_mesh:
         sink.stage("uv_unwrap", status="running", progress=0.0, message="Generating UV unwrap")
         run_uv_wrap_in_subprocess(white_mesh_path, uv_mesh_path, sink)
         textured_mesh_input = load_mesh_file(uv_mesh_path)
+        ensure_mesh_has_uvs(textured_mesh_input, context="Generated UV mesh")
         texture_pipeline.render.load_mesh(textured_mesh_input)
         sink.asset(
             "uv_unwrap",
