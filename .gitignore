@@ -40,3 +40,6 @@ frontend/dist/
 *.ckpt
 *.safetensors
 *.onnx
+
+build/
+*.egg-info/

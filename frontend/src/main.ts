@@ -42,6 +42,7 @@ const state = {
   uploadError: "",
   selectedFile: null as File | null,
   viewerState: {} as Record<string, ViewerState>,
+  loadedModelAssets: {} as Record<string, true>,
   lastDetailRunId: "",
   lastStageSignature: "",
   lastAssetPanelSignature: "",
@@ -638,6 +639,15 @@ function attachViewerPersistence(viewer: ModelViewerElement, assetId: string): v
   });
 }
 
+function loadModelPreview(assetId: string): void {
+  state.loadedModelAssets[assetId] = true;
+  const run = getSelectedRun();
+  if (!run) {
+    return;
+  }
+  syncAssetGroups(run);
+}
+
 function createAssetCard(asset: Asset): HTMLElement {
   const element = document.createElement("article");
   element.className = "asset-card";
@@ -667,37 +677,53 @@ function updateAssetCard(element: HTMLElement, asset: Asset): void {
   if (!mediaHost) return;
 
   if (asset.kind === "model") {
-    let viewer = mediaHost.querySelector<ModelViewerElement>("model-viewer");
-    if (!viewer) {
-      viewer = document.createElement("model-viewer") as ModelViewerElement;
-      mediaHost.replaceChildren(viewer);
-      attachViewerPersistence(viewer, asset.id);
-      const viewerState = state.viewerState[asset.id];
-      viewer.dataset.assetId = asset.id;
-      viewer.setAttribute("src", asset.url);
-      viewer.setAttribute("camera-controls", "");
-      viewer.setAttribute("camera-orbit", viewerState?.cameraOrbit ?? "45deg 70deg auto");
-      viewer.setAttribute("camera-target", viewerState?.cameraTarget ?? "auto auto auto");
-      viewer.setAttribute("field-of-view", viewerState?.fieldOfView ?? "28deg");
-      viewer.setAttribute("shadow-intensity", "0.36");
-      viewer.setAttribute("exposure", "0.48");
-      viewer.setAttribute("interaction-prompt", "none");
-      viewer.setAttribute("poster", "");
-    } else if ((viewer.getAttribute("src") ?? "") !== asset.url) {
-      const viewerState = state.viewerState[asset.id];
-      viewer.dataset.assetId = asset.id;
-      viewer.setAttribute("src", asset.url);
-      viewer.setAttribute("shadow-intensity", "0.36");
-      viewer.setAttribute("exposure", "0.48");
-      if (viewerState?.cameraOrbit) {
-        viewer.setAttribute("camera-orbit", viewerState.cameraOrbit);
+    if (state.loadedModelAssets[asset.id]) {
+      let viewer = mediaHost.querySelector<ModelViewerElement>("model-viewer");
+      if (!viewer) {
+        viewer = document.createElement("model-viewer") as ModelViewerElement;
+        mediaHost.replaceChildren(viewer);
+        attachViewerPersistence(viewer, asset.id);
+        const viewerState = state.viewerState[asset.id];
+        viewer.dataset.assetId = asset.id;
+        viewer.setAttribute("src", asset.url);
+        viewer.setAttribute("camera-controls", "");
+        viewer.setAttribute("camera-orbit", viewerState?.cameraOrbit ?? "45deg 70deg auto");
+        viewer.setAttribute("camera-target", viewerState?.cameraTarget ?? "auto auto auto");
+        viewer.setAttribute("field-of-view", viewerState?.fieldOfView ?? "28deg");
+        viewer.setAttribute("shadow-intensity", "0.36");
+        viewer.setAttribute("exposure", "0.48");
+        viewer.setAttribute("interaction-prompt", "none");
+        viewer.setAttribute("poster", "");
+      } else if ((viewer.getAttribute("src") ?? "") !== asset.url) {
+        const viewerState = state.viewerState[asset.id];
+        viewer.dataset.assetId = asset.id;
+        viewer.setAttribute("src", asset.url);
+        viewer.setAttribute("shadow-intensity", "0.36");
+        viewer.setAttribute("exposure", "0.48");
+        if (viewerState?.cameraOrbit) {
+          viewer.setAttribute("camera-orbit", viewerState.cameraOrbit);
+        }
+        if (viewerState?.cameraTarget) {
+          viewer.setAttribute("camera-target", viewerState.cameraTarget);
+        }
+        if (viewerState?.fieldOfView) {
+          viewer.setAttribute("field-of-view", viewerState.fieldOfView);
+        }
       }
-      if (viewerState?.cameraTarget) {
-        viewer.setAttribute("camera-target", viewerState.cameraTarget);
+    } else {
+      let placeholder = mediaHost.querySelector<HTMLElement>('[data-role="model-placeholder"]');
+      if (!placeholder) {
+        placeholder = document.createElement("div");
+        placeholder.className = "model-placeholder";
+        placeholder.dataset.role = "model-placeholder";
+        mediaHost.replaceChildren(placeholder);
       }
-      if (viewerState?.fieldOfView) {
-        viewer.setAttribute("field-of-view", viewerState.fieldOfView);
-      }
+      placeholder.innerHTML = `
+        <div class="model-placeholder-copy">
+          <strong>Mesh preview is unloaded.</strong>
+          <span class="muted">Load it on demand to avoid slowing down pages with many GLBs.</span>
+        </div>
+      `;
     }
   } else {
     let image = mediaHost.querySelector<HTMLImageElement>("img");
@@ -716,7 +742,23 @@ function updateAssetCard(element: HTMLElement, asset: Asset): void {
   const actions = element.querySelector<HTMLElement>('[data-role="actions"]');
   if (actions) {
     if (asset.kind === "model") {
-      actions.innerHTML = `<a class="download-link" href="${asset.url}" download>Download GLB</a>`;
+      actions.replaceChildren();
+      const loadButton = document.createElement("button");
+      loadButton.type = "button";
+      loadButton.className = "asset-action-button";
+      loadButton.textContent = state.loadedModelAssets[asset.id] ? "Preview loaded" : "Load preview";
+      loadButton.disabled = Boolean(state.loadedModelAssets[asset.id]);
+      loadButton.addEventListener("click", () => {
+        loadModelPreview(asset.id);
+      });
+      actions.appendChild(loadButton);
+
+      const downloadLink = document.createElement("a");
+      downloadLink.className = "download-link";
+      downloadLink.href = asset.url;
+      downloadLink.download = "";
+      downloadLink.textContent = "Download GLB";
+      actions.appendChild(downloadLink);
     } else {
       actions.replaceChildren();
     }

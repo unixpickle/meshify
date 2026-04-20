@@ -427,7 +427,8 @@ button:disabled {
 }
 
 .asset-card img,
-.asset-card model-viewer {
+.asset-card model-viewer,
+.model-placeholder {
   width: 100%;
   border-radius: 14px;
   background: radial-gradient(circle at top, #667784 0%, #33404a 34%, #171e24 100%);
@@ -451,6 +452,23 @@ button:disabled {
   filter: saturate(0.72) brightness(0.82) contrast(1.08);
 }
 
+.model-placeholder {
+  display: grid;
+  place-items: center;
+  min-height: 340px;
+  padding: 22px;
+  border: 1px dashed rgba(255, 255, 255, 0.14);
+  background:
+    radial-gradient(circle at top, rgba(128, 153, 170, 0.24) 0%, rgba(41, 52, 61, 0.96) 40%, #12191f 100%);
+  text-align: center;
+}
+
+.model-placeholder-copy {
+  display: grid;
+  gap: 8px;
+  max-width: 24rem;
+}
+
 .asset-meta {
   display: grid;
   gap: 6px;
@@ -460,9 +478,12 @@ button:disabled {
 .asset-actions {
   display: flex;
   justify-content: flex-start;
+  flex-wrap: wrap;
+  gap: 10px;
   margin-top: 4px;
 }
 
+.asset-action-button,
 .download-link {
   display: inline-flex;
   align-items: center;
@@ -472,12 +493,21 @@ button:disabled {
   border-radius: 999px;
   background: rgba(16, 33, 39, 0.08);
   color: var(--ink);
+  border: 0;
   text-decoration: none;
   font-size: 0.92rem;
   font-weight: 700;
+  font-family: inherit;
+  cursor: pointer;
   transition: transform 140ms ease, background 140ms ease;
 }
 
+.asset-action-button:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.asset-action-button:hover:not(:disabled),
 .download-link:hover {
   transform: translateY(-1px);
   background: rgba(218, 95, 49, 0.14);
@@ -541,7 +571,9 @@ button:disabled {
     grid-template-columns: 1fr;
   }
 
-  .asset-card model-viewer {
+  .asset-card model-viewer,
+  .model-placeholder {
     height: 420px;
+    min-height: 420px;
   }
 }
