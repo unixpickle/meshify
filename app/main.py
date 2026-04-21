@@ -59,6 +59,14 @@ def get_run(run_id: str) -> dict:
     return run
 
 
+@app.delete("/api/runs/{run_id}", status_code=204)
+def delete_run(run_id: str) -> None:
+    run = store.load_run(run_id, include_deleting=True)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    job_manager.request_delete(run_id)
+
+
 @app.get("/api/events")
 async def wait_for_events(since: int = 0, timeout: float = 25.0) -> dict:
     clamped_timeout = max(5.0, min(timeout, 55.0))

@@ -238,6 +238,29 @@ def create_asset(
     return asset_id
 
 
+def mark_run_deleting(run_id: str) -> None:
+    now = utc_now()
+    with DB_LOCK, get_connection() as connection:
+        current = connection.execute("SELECT id FROM runs WHERE id = ?", (run_id,)).fetchone()
+        if current is None:
+            raise KeyError(f"Run {run_id} not found")
+        connection.execute(
+            """
+            UPDATE runs
+            SET status = 'deleting', message = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            ("Deletion requested", now, run_id),
+        )
+    event_broker.publish("run.updated", run_id)
+
+
+def delete_run(run_id: str) -> None:
+    with DB_LOCK, get_connection() as connection:
+        connection.execute("DELETE FROM runs WHERE id = ?", (run_id,))
+    event_broker.publish("run.deleted", run_id)
+
+
 def recover_incomplete_runs() -> list[str]:
     with DB_LOCK, get_connection() as connection:
         rows = connection.execute(
@@ -246,10 +269,12 @@ def recover_incomplete_runs() -> list[str]:
     return [row["id"] for row in rows]
 
 
-def load_run(run_id: str) -> dict[str, Any] | None:
+def load_run(run_id: str, *, include_deleting: bool = False) -> dict[str, Any] | None:
     with DB_LOCK, get_connection() as connection:
         run_row = connection.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
         if run_row is None:
+            return None
+        if not include_deleting and run_row["status"] == "deleting":
             return None
         stage_rows = connection.execute(
             "SELECT * FROM stages WHERE run_id = ? ORDER BY stage_order ASC",
@@ -274,14 +299,21 @@ def load_run(run_id: str) -> dict[str, Any] | None:
 
     image_assets = [asset for asset in run["assets"] if asset["kind"] == "image"]
     model_assets = [asset for asset in run["assets"] if asset["kind"] == "model"]
+    previewable_models = [asset for asset in model_assets if asset["metadata"].get("previewable") is True]
     run["preview_image_url"] = image_assets[0]["url"] if image_assets else None
-    run["final_model_url"] = model_assets[-1]["url"] if model_assets else None
+    run["final_model_url"] = (
+        previewable_models[-1]["url"]
+        if previewable_models
+        else (model_assets[-1]["url"] if model_assets else None)
+    )
     return run
 
 
 def list_runs() -> list[dict[str, Any]]:
     with DB_LOCK, get_connection() as connection:
-        rows = connection.execute("SELECT id FROM runs ORDER BY created_at DESC").fetchall()
+        rows = connection.execute(
+            "SELECT id FROM runs WHERE status != 'deleting' ORDER BY created_at DESC"
+        ).fetchall()
     runs: list[dict[str, Any]] = []
     for row in rows:
         run = load_run(row["id"])

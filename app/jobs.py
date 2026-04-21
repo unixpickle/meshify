@@ -2,19 +2,21 @@ from __future__ import annotations
 
 import logging
 import queue
+import shutil
 import threading
 from pathlib import Path
 
 from . import config, store
-from .mesh_pipeline import PipelineSettings, StageSink, run_pipeline
+from .mesh_pipeline import PipelineSettings, RunDeletedError, StageSink, run_pipeline
 
 
 logger = logging.getLogger(__name__)
 
 
 class DatabaseStageSink(StageSink):
-    def __init__(self, run_id: str):
+    def __init__(self, run_id: str, ensure_active):
         self.run_id = run_id
+        self._ensure_active = ensure_active
         self._last_logged_progress: dict[str, int] = {}
         self._last_logged_message: dict[str, str | None] = {}
         self._last_logged_status: dict[str, str] = {}
@@ -27,6 +29,7 @@ class DatabaseStageSink(StageSink):
         progress: float,
         message: str | None = None,
     ) -> None:
+        self._ensure_active()
         stage_index = store.STAGE_ORDER[stage_key]
         stage_count = len(store.STAGE_DEFINITIONS)
         overall_progress = min(((stage_index - 1) + progress) / stage_count, 1.0)
@@ -85,6 +88,7 @@ class DatabaseStageSink(StageSink):
         mime_type: str,
         metadata: dict[str, object] | None = None,
     ) -> None:
+        self._ensure_active()
         relative_path = path.relative_to(config.STORAGE_DIR)
         store.create_asset(
             self.run_id,
@@ -102,6 +106,9 @@ class JobManager:
         self.queue: queue.Queue[str] = queue.Queue()
         self.thread = threading.Thread(target=self._worker, daemon=True)
         self.started = False
+        self.lock = threading.Lock()
+        self.active_runs: set[str] = set()
+        self.cancel_requested: set[str] = set()
 
     def start(self) -> None:
         if self.started:
@@ -122,23 +129,56 @@ class JobManager:
         )
         self.queue.put(run_id)
 
+    def ensure_active(self, run_id: str) -> None:
+        with self.lock:
+            if run_id in self.cancel_requested:
+                raise RunDeletedError(f"Run {run_id} was deleted")
+
+    def request_delete(self, run_id: str) -> bool:
+        with self.lock:
+            is_active = run_id in self.active_runs
+            self.cancel_requested.add(run_id)
+        if is_active:
+            store.mark_run_deleting(run_id)
+            return True
+        self._cleanup_run(run_id)
+        return False
+
+    def _cleanup_run(self, run_id: str) -> None:
+        with self.lock:
+            self.cancel_requested.add(run_id)
+        shutil.rmtree(config.UPLOADS_DIR / run_id, ignore_errors=True)
+        shutil.rmtree(config.RUNS_DIR / run_id, ignore_errors=True)
+        store.delete_run(run_id)
+        with self.lock:
+            self.cancel_requested.discard(run_id)
+
     def _worker(self) -> None:
         while True:
             run_id = self.queue.get()
             try:
                 self._process(run_id)
+            except RunDeletedError:
+                logger.info("run=%s deleted during processing", run_id)
+                self._cleanup_run(run_id)
             except Exception as exc:  # pragma: no cover - defensive background handling
-                store.update_run(
-                    run_id,
-                    status="failed",
-                    error=str(exc),
-                    message=str(exc),
-                    progress=0.0,
-                )
+                run = store.load_run(run_id, include_deleting=True)
+                if run is not None:
+                    store.update_run(
+                        run_id,
+                        status="failed",
+                        error=str(exc),
+                        message=str(exc),
+                        progress=0.0,
+                    )
             finally:
+                with self.lock:
+                    self.active_runs.discard(run_id)
                 self.queue.task_done()
 
     def _process(self, run_id: str) -> None:
+        with self.lock:
+            self.active_runs.add(run_id)
         run = store.load_run(run_id)
         if run is None:
             return
@@ -150,7 +190,7 @@ class JobManager:
         output_dir.mkdir(parents=True, exist_ok=True)
         output_path = output_dir / "textured_mesh.glb"
 
-        sink = DatabaseStageSink(run_id)
+        sink = DatabaseStageSink(run_id, lambda: self.ensure_active(run_id))
         settings = PipelineSettings(
             image_path=config.STORAGE_DIR / upload_asset["storage_path"],
             output_path=output_path,
@@ -164,7 +204,7 @@ class JobManager:
             message="Resuming" if run["status"] == "running" else "Starting",
             started=True,
         )
-        run_pipeline(settings, sink, previous_run=run)
+        run_pipeline(settings, sink, previous_run=run, ensure_active=lambda: self.ensure_active(run_id))
 
 
 job_manager = JobManager()

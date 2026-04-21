@@ -28,7 +28,7 @@ export interface Asset {
 export interface Run {
   id: string;
   original_name: string;
-  status: "queued" | "running" | "completed" | "failed";
+  status: "queued" | "running" | "completed" | "failed" | "deleting";
   current_stage: string;
   progress: number;
   message: string | null;

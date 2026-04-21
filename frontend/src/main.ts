@@ -1,4 +1,4 @@
-import { createRun, listRuns, waitForRunsEvent } from "./api.js";
+import { createRun, deleteRun, listRuns, waitForRunsEvent } from "./api.js";
 import type { Asset, Run, Stage } from "./types.js";
 
 const rootElement = document.querySelector<HTMLDivElement>("#app");
@@ -39,6 +39,7 @@ const state = {
   eventId: 0,
   selectedRunId: "",
   uploading: false,
+  deletingRun: false,
   uploadError: "",
   selectedFile: null as File | null,
   viewerState: {} as Record<string, ViewerState>,
@@ -102,12 +103,50 @@ function stageClass(stage: Stage, currentStage: string): string {
   return "stage-card";
 }
 
-function groupAssets(run: Run): Map<string, Asset[]> {
-  const groups = new Map<string, Asset[]>();
+type AssetGroup = {
+  id: string;
+  stage: Stage;
+  title: string;
+  message: string;
+  assets: Asset[];
+};
+
+function groupAssets(run: Run): AssetGroup[] {
+  const stageByKey = new Map(run.stages.map((stage) => [stage.stage_key, stage]));
+  const groupedAssets = new Map<string, Asset[]>();
   for (const asset of run.assets) {
-    const current = groups.get(asset.stage_key) ?? [];
+    const groupId = asset.stage_key === "export" && !assetIsPreviewableModel(asset)
+      ? "export_downloads"
+      : asset.stage_key;
+    const current = groupedAssets.get(groupId) ?? [];
     current.push(asset);
-    groups.set(asset.stage_key, current);
+    groupedAssets.set(groupId, current);
+  }
+
+  const groups: AssetGroup[] = [];
+  for (const stage of run.stages) {
+    const assets = groupedAssets.get(stage.stage_key);
+    if (assets && assets.length > 0) {
+      groups.push({
+        id: stage.stage_key,
+        stage,
+        title: stage.stage_label,
+        message: stage.message ?? "Stage output",
+        assets,
+      });
+    }
+    if (stage.stage_key === "export") {
+      const downloadAssets = groupedAssets.get("export_downloads");
+      if (downloadAssets && downloadAssets.length > 0) {
+        groups.push({
+          id: "export_downloads",
+          stage,
+          title: "OBJ Exports",
+          message: "Download-only OBJ artifacts generated from the textured mesh export.",
+          assets: downloadAssets,
+        });
+      }
+    }
   }
   return groups;
 }
@@ -119,15 +158,12 @@ function buildStageSignature(run: Run): string {
 }
 
 function buildAssetPanelSignature(run: Run): string {
-  const assetsByStage = groupAssets(run);
-  return run.stages
-    .filter((stage) => assetsByStage.has(stage.stage_key))
-    .map((stage) => {
-      const assets = assetsByStage.get(stage.stage_key) ?? [];
-      const assetSignature = assets
+  return groupAssets(run)
+    .map((group) => {
+      const assetSignature = group.assets
         .map((asset) => [asset.id, asset.kind, asset.label, asset.url].join("|"))
         .join("~~");
-      return [stage.stage_key, stage.status, stage.message ?? "", assetSignature].join("::");
+      return [group.id, group.stage.status, group.message, assetSignature].join("::");
     })
     .join("||");
 }
@@ -518,6 +554,9 @@ function createDetailShell(): void {
 
       <section class="detail-grid" data-role="detail-grid">
       <header class="detail-header" data-role="detail-header">
+        <div class="detail-header-actions">
+          <button class="danger" type="button" data-role="delete-run-button">Delete Run</button>
+        </div>
         <div class="detail-topline">
           <span class="pill" data-role="detail-status"></span>
           <span class="muted" data-role="detail-created"></span>
@@ -547,6 +586,9 @@ function createDetailShell(): void {
   `;
   refs.detailHost.querySelector<HTMLButtonElement>('[data-role="back-button"]')?.addEventListener("click", () => {
     navigateHome(false);
+  });
+  refs.detailHost.querySelector<HTMLButtonElement>('[data-role="delete-run-button"]')?.addEventListener("click", () => {
+    void onDeleteRun();
   });
 }
 
@@ -671,12 +713,24 @@ function createAssetCard(asset: Asset): HTMLElement {
   return element;
 }
 
+function assetIsPreviewableModel(asset: Asset): boolean {
+  return asset.kind === "model" && (
+    asset.metadata.previewable === true ||
+    (asset.metadata.previewable !== false && asset.mime_type === "model/gltf-binary")
+  );
+}
+
+function assetDownloadLabel(asset: Asset): string {
+  const label = asset.metadata.download_label;
+  return typeof label === "string" && label ? label : "Download file";
+}
+
 function updateAssetCard(element: HTMLElement, asset: Asset): void {
   element.dataset.assetId = asset.id;
   const mediaHost = element.querySelector<HTMLElement>('[data-role="media-host"]');
   if (!mediaHost) return;
 
-  if (asset.kind === "model") {
+  if (assetIsPreviewableModel(asset)) {
     if (state.loadedModelAssets[asset.id]) {
       let viewer = mediaHost.querySelector<ModelViewerElement>("model-viewer");
       if (!viewer) {
@@ -725,6 +779,20 @@ function updateAssetCard(element: HTMLElement, asset: Asset): void {
         </div>
       `;
     }
+  } else if (asset.kind === "model") {
+    let placeholder = mediaHost.querySelector<HTMLElement>('[data-role="model-placeholder"]');
+    if (!placeholder) {
+      placeholder = document.createElement("div");
+      placeholder.className = "model-placeholder";
+      placeholder.dataset.role = "model-placeholder";
+      mediaHost.replaceChildren(placeholder);
+    }
+    placeholder.innerHTML = `
+      <div class="model-placeholder-copy">
+        <strong>Download-only export.</strong>
+        <span class="muted">This artifact does not have an inline preview.</span>
+      </div>
+    `;
   } else {
     let image = mediaHost.querySelector<HTMLImageElement>("img");
     if (!image) {
@@ -743,21 +811,23 @@ function updateAssetCard(element: HTMLElement, asset: Asset): void {
   if (actions) {
     if (asset.kind === "model") {
       actions.replaceChildren();
-      const loadButton = document.createElement("button");
-      loadButton.type = "button";
-      loadButton.className = "asset-action-button";
-      loadButton.textContent = state.loadedModelAssets[asset.id] ? "Preview loaded" : "Load preview";
-      loadButton.disabled = Boolean(state.loadedModelAssets[asset.id]);
-      loadButton.addEventListener("click", () => {
-        loadModelPreview(asset.id);
-      });
-      actions.appendChild(loadButton);
+      if (assetIsPreviewableModel(asset)) {
+        const loadButton = document.createElement("button");
+        loadButton.type = "button";
+        loadButton.className = "asset-action-button";
+        loadButton.textContent = state.loadedModelAssets[asset.id] ? "Preview loaded" : "Load preview";
+        loadButton.disabled = Boolean(state.loadedModelAssets[asset.id]);
+        loadButton.addEventListener("click", () => {
+          loadModelPreview(asset.id);
+        });
+        actions.appendChild(loadButton);
+      }
 
       const downloadLink = document.createElement("a");
       downloadLink.className = "download-link";
       downloadLink.href = asset.url;
       downloadLink.download = "";
-      downloadLink.textContent = "Download GLB";
+      downloadLink.textContent = assetDownloadLabel(asset);
       actions.appendChild(downloadLink);
     } else {
       actions.replaceChildren();
@@ -765,10 +835,10 @@ function updateAssetCard(element: HTMLElement, asset: Asset): void {
   }
 }
 
-function createAssetGroup(stage: Stage): HTMLElement {
+function createAssetGroup(groupId: string): HTMLElement {
   const element = document.createElement("section");
   element.className = "asset-group";
-  element.dataset.stageKey = stage.stage_key;
+  element.dataset.stageKey = groupId;
   element.innerHTML = `
     <div>
       <h3 data-role="group-title"></h3>
@@ -783,10 +853,9 @@ function syncAssetGroups(run: Run): void {
   const host = refs.detailHost?.querySelector<HTMLElement>('[data-role="asset-groups-host"]');
   if (!host) return;
 
-  const assetsByStage = groupAssets(run);
-  const stagesWithAssets = run.stages.filter((stage) => assetsByStage.has(stage.stage_key));
+  const assetGroups = groupAssets(run);
 
-  if (stagesWithAssets.length === 0) {
+  if (assetGroups.length === 0) {
     host.innerHTML = `
       <section class="empty-state">
         <strong>No stage assets yet.</strong>
@@ -815,18 +884,17 @@ function syncAssetGroups(run: Run): void {
     duplicate.remove();
   }
 
-  for (const stage of stagesWithAssets) {
-    const groupIndex = stagesWithAssets.indexOf(stage);
-    const assets = assetsByStage.get(stage.stage_key) ?? [];
-    let group = existingGroups.get(stage.stage_key);
+  for (const assetGroup of assetGroups) {
+    const groupIndex = assetGroups.indexOf(assetGroup);
+    let group = existingGroups.get(assetGroup.id);
     if (!group) {
-      group = createAssetGroup(stage);
+      group = createAssetGroup(assetGroup.id);
     }
 
     const title = group.querySelector<HTMLElement>('[data-role="group-title"]');
-    if (title) title.textContent = stage.stage_label;
+    if (title) title.textContent = assetGroup.title;
     const message = group.querySelector<HTMLElement>('[data-role="group-message"]');
-    if (message) message.textContent = stage.message ?? "Stage output";
+    if (message) message.textContent = assetGroup.message;
 
     const grid = group.querySelector<HTMLElement>('[data-role="asset-grid"]');
     if (grid) {
@@ -847,8 +915,8 @@ function syncAssetGroups(run: Run): void {
         duplicate.remove();
       }
 
-      for (const asset of assets) {
-        const assetIndex = assets.indexOf(asset);
+      for (const asset of assetGroup.assets) {
+        const assetIndex = assetGroup.assets.indexOf(asset);
         let card = existingAssets.get(asset.id);
         if (!card) {
           card = createAssetCard(asset);
@@ -864,7 +932,7 @@ function syncAssetGroups(run: Run): void {
     }
 
     placeChild(host, group, groupIndex);
-    existingGroups.delete(stage.stage_key);
+    existingGroups.delete(assetGroup.id);
   }
 
   for (const stale of existingGroups.values()) {
@@ -902,6 +970,11 @@ function syncDetail(): void {
   if (detailMessage) detailMessage.textContent = run.message ?? "Queued";
   const detailProgress = refs.detailHost?.querySelector<HTMLElement>('[data-role="detail-progress"]');
   if (detailProgress) detailProgress.style.width = formatPercent(run.progress);
+  const deleteRunButton = refs.detailHost?.querySelector<HTMLButtonElement>('[data-role="delete-run-button"]');
+  if (deleteRunButton) {
+    deleteRunButton.disabled = state.deletingRun;
+    deleteRunButton.textContent = state.deletingRun ? "Deleting..." : "Delete Run";
+  }
 
   const detailRunChanged = state.lastDetailRunId !== run.id;
   const stageSignature = buildStageSignature(run);
@@ -957,6 +1030,38 @@ async function onUploadSubmit(event: Event): Promise<void> {
     syncUI();
   } finally {
     state.uploading = false;
+    syncUI();
+  }
+}
+
+async function onDeleteRun(): Promise<void> {
+  const run = getSelectedRun();
+  if (!run || state.deletingRun) {
+    return;
+  }
+  const confirmed = window.confirm(
+    "Delete this pipeline run and all related assets? If it is still running, it will stop after the current stage.",
+  );
+  if (!confirmed) {
+    return;
+  }
+
+  state.deletingRun = true;
+  syncDetail();
+  try {
+    await deleteRun(run.id);
+    for (const asset of run.assets) {
+      delete state.viewerState[asset.id];
+      delete state.loadedModelAssets[asset.id];
+    }
+    state.runs = state.runs.filter((item) => item.id !== run.id);
+    navigateHome(false);
+    syncUI();
+    restartLongPolling();
+  } catch (error) {
+    window.alert(error instanceof Error ? error.message : "Failed to delete run.");
+  } finally {
+    state.deletingRun = false;
     syncUI();
   }
 }

@@ -259,6 +259,11 @@ button:disabled {
   color: var(--ink);
 }
 
+.danger {
+  background: linear-gradient(135deg, #d85648, #a5372b);
+  color: white;
+}
+
 .run-list {
   display: grid;
   gap: 14px;
@@ -340,6 +345,11 @@ button:disabled {
   color: var(--danger);
 }
 
+.pill.deleting {
+  background: rgba(183, 66, 53, 0.12);
+  color: var(--danger);
+}
+
 .progress-shell {
   height: 10px;
   border-radius: 999px;
@@ -374,6 +384,12 @@ button:disabled {
   background: var(--panel-strong);
   border: 1px solid var(--line);
   box-shadow: var(--shadow);
+}
+
+.detail-header-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 14px;
 }
 
 .detail-columns {
@@ -429,23 +445,25 @@ button:disabled {
 .asset-card img,
 .asset-card model-viewer,
 .model-placeholder {
-  width: 100%;
   border-radius: 14px;
   background: radial-gradient(circle at top, #667784 0%, #33404a 34%, #171e24 100%);
 }
 
 .asset-card img {
   display: block;
-  aspect-ratio: 1 / 1;
-  object-fit: cover;
+  width: min(100%, 512px);
+  max-height: 512px;
+  object-fit: contain;
 }
 
 .asset-card [data-role="media-host"] {
-  display: block;
+  display: flex;
+  justify-content: center;
 }
 
 .asset-card model-viewer {
   display: block;
+  width: 100%;
   height: 340px;
   border: 1px solid rgba(255, 255, 255, 0.08);
   background: radial-gradient(circle at top, #525e69 0%, #29343d 38%, #12191f 100%);
@@ -454,6 +472,7 @@ button:disabled {
 
 .model-placeholder {
   display: grid;
+  width: 100%;
   place-items: center;
   min-height: 340px;
   padding: 22px;
@@ -569,6 +588,11 @@ button:disabled {
 
   .asset-grid {
     grid-template-columns: 1fr;
+  }
+
+  .asset-card img {
+    width: 100%;
+    max-height: none;
   }
 
   .asset-card model-viewer,

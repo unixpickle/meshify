@@ -7,9 +7,10 @@ import os
 import threading
 import time
 import traceback
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Callable, Protocol
 
 import numpy as np
 import torch
@@ -44,6 +45,10 @@ class StageSink(Protocol):
         mime_type: str,
         metadata: dict[str, object] | None = None,
     ) -> None: ...
+
+
+class RunDeletedError(RuntimeError):
+    pass
 
 
 @dataclass(slots=True)
@@ -203,6 +208,76 @@ def prepare_uv_mesh_for_export(mesh):
         material=material,
     )
     return mesh
+
+
+def _sample_texture_at_uvs(texture_image: Image.Image, uvs: np.ndarray) -> np.ndarray:
+    texture = np.asarray(texture_image.convert("RGB"), dtype=np.float32)
+    height, width = texture.shape[:2]
+    if width == 0 or height == 0:
+        raise RuntimeError("Texture image is empty")
+
+    clamped_uvs = np.clip(uvs, 0.0, 1.0)
+    x = clamped_uvs[:, 0] * (width - 1)
+    y = (1.0 - clamped_uvs[:, 1]) * (height - 1)
+
+    x0 = np.floor(x).astype(np.int32)
+    y0 = np.floor(y).astype(np.int32)
+    x1 = np.clip(x0 + 1, 0, width - 1)
+    y1 = np.clip(y0 + 1, 0, height - 1)
+
+    wx = (x - x0)[:, None]
+    wy = (y - y0)[:, None]
+
+    c00 = texture[y0, x0]
+    c10 = texture[y0, x1]
+    c01 = texture[y1, x0]
+    c11 = texture[y1, x1]
+    colors = (
+        c00 * (1.0 - wx) * (1.0 - wy)
+        + c10 * wx * (1.0 - wy)
+        + c01 * (1.0 - wx) * wy
+        + c11 * wx * wy
+    )
+    alpha = np.full((len(colors), 1), 255, dtype=np.uint8)
+    return np.concatenate([np.rint(colors).astype(np.uint8), alpha], axis=1)
+
+
+def export_vertex_colored_obj(mesh, texture_path: Path, destination: Path) -> None:
+    ensure_mesh_has_uvs(mesh, context="Vertex color OBJ export")
+    vertex_colors = _sample_texture_at_uvs(load_image_file(texture_path, "RGB"), mesh.visual.uv)
+    colored_mesh = mesh.copy()
+    colored_mesh.visual = trimesh.visual.ColorVisuals(mesh=colored_mesh, vertex_colors=vertex_colors)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(colored_mesh.export(file_type="obj"), encoding="utf-8")
+
+
+def export_textured_obj_zip(mesh, texture_path: Path, destination: Path) -> None:
+    ensure_mesh_has_uvs(mesh, context="Textured OBJ export")
+    export_mesh = mesh.copy()
+    texture_image = load_image_file(texture_path, "RGB")
+    material = trimesh.visual.texture.SimpleMaterial(
+        image=texture_image,
+        diffuse=(255, 255, 255),
+    )
+    export_mesh.visual = trimesh.visual.TextureVisuals(
+        uv=np.asarray(mesh.visual.uv),
+        image=texture_image,
+        material=material,
+    )
+
+    obj_text, sidecars = trimesh.exchange.obj.export_obj(
+        export_mesh,
+        include_normals=True,
+        include_texture=True,
+        return_texture=True,
+        write_texture=False,
+        mtl_name="textured_mesh.mtl",
+    )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(destination, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("textured_mesh.obj", obj_text)
+        for name, contents in sidecars.items():
+            archive.writestr(name, contents)
 
 
 def _uv_wrap_worker(input_mesh_path: str, output_mesh_path: str, result_conn) -> None:
@@ -414,7 +489,12 @@ def instrument_progress(reporter: ProgressReporter):
         reporter.finish()
 
 
-def run_pipeline(settings: PipelineSettings, sink: StageSink, previous_run: dict[str, object] | None = None) -> Path:
+def run_pipeline(
+    settings: PipelineSettings,
+    sink: StageSink,
+    previous_run: dict[str, object] | None = None,
+    ensure_active: Callable[[], None] | None = None,
+) -> Path:
     device = settings.device or choose_device()
     dtype = choose_dtype(device)
     variant = choose_variant(settings.variant, dtype)
@@ -428,6 +508,10 @@ def run_pipeline(settings: PipelineSettings, sink: StageSink, previous_run: dict
     def stage_can_resume(stage_key: str, *paths: Path) -> bool:
         return previous_stages.get(stage_key) == "completed" and all(path.exists() for path in paths)
 
+    def require_active() -> None:
+        if ensure_active is not None:
+            ensure_active()
+
     processed_path = settings.output_path.parent / "preprocessed.png"
     white_mesh_path = settings.output_path.parent / "white_mesh.glb"
     delighted_path = settings.output_path.parent / "delighted.png"
@@ -438,8 +522,11 @@ def run_pipeline(settings: PipelineSettings, sink: StageSink, previous_run: dict
     multiview_dir = settings.output_path.parent / "painted_views"
     mask_path = settings.output_path.parent / "texture_mask.png"
     texture_path = settings.output_path.parent / "texture_map.png"
+    vertex_color_obj_path = settings.output_path.parent / "vertex_colors.obj"
+    textured_obj_zip_path = settings.output_path.parent / "textured_obj.zip"
 
     if stage_can_resume("preprocess", processed_path):
+        require_active()
         prepared_image = load_image_file(processed_path, "RGBA")
         sink.asset(
             "preprocess",
@@ -450,9 +537,12 @@ def run_pipeline(settings: PipelineSettings, sink: StageSink, previous_run: dict
         )
         sink.stage("preprocess", status="completed", progress=1.0, message="Reused background removal")
     else:
+        require_active()
         sink.stage("preprocess", status="running", progress=0.0, message="Preparing image")
         prepared_image = preprocess_image(settings.image_path, settings.remove_background)
+        require_active()
         save_image(prepared_image, processed_path)
+        require_active()
         sink.asset(
             "preprocess",
             kind="image",
@@ -463,6 +553,7 @@ def run_pipeline(settings: PipelineSettings, sink: StageSink, previous_run: dict
         sink.stage("preprocess", status="completed", progress=1.0, message="Background removed")
 
     if stage_can_resume("mesh_export", white_mesh_path):
+        require_active()
         mesh = load_mesh_file(white_mesh_path)
         sink.stage("model_load", status="completed", progress=1.0, message="Skipped shape model load; reusing white mesh")
         sink.stage("diffusion", status="completed", progress=1.0, message="Reused saved shape sampling")
@@ -476,6 +567,7 @@ def run_pipeline(settings: PipelineSettings, sink: StageSink, previous_run: dict
         )
         sink.stage("mesh_export", status="completed", progress=1.0, message="Reused white mesh")
     else:
+        require_active()
         sink.stage("model_load", status="running", progress=0.0, message="Loading shape model")
         pipeline = _load_shape_pipeline(
             model_path=settings.model_path,
@@ -486,6 +578,7 @@ def run_pipeline(settings: PipelineSettings, sink: StageSink, previous_run: dict
         )
         sink.stage("model_load", status="completed", progress=1.0, message=f"Shape model ready on {device}")
 
+        require_active()
         sink.stage("diffusion", status="running", progress=0.0, message="Sampling shape")
         reporter = ProgressReporter(sink)
         generator = create_generator(settings.seed)
@@ -500,8 +593,11 @@ def run_pipeline(settings: PipelineSettings, sink: StageSink, previous_run: dict
                 enable_pbar=True,
             )[0]
 
+        require_active()
         sink.stage("mesh_export", status="running", progress=0.0, message="Writing white mesh")
+        require_active()
         mesh.export(white_mesh_path)
+        require_active()
         sink.asset(
             "mesh_export",
             kind="model",
@@ -511,6 +607,7 @@ def run_pipeline(settings: PipelineSettings, sink: StageSink, previous_run: dict
         )
         sink.stage("mesh_export", status="completed", progress=1.0, message="White mesh saved")
 
+    require_active()
     sink.stage("texture_model_load", status="running", progress=0.0, message="Loading paint models")
     texture_pipeline = _load_texture_pipeline(
         settings.texgen_model_path,
@@ -523,6 +620,7 @@ def run_pipeline(settings: PipelineSettings, sink: StageSink, previous_run: dict
     relight_input = texture_pipeline.recenter_image(prepared_image)
 
     if stage_can_resume("delight", delighted_path):
+        require_active()
         delighted_image = load_image_file(delighted_path, "RGB")
         sink.asset(
             "delight",
@@ -533,6 +631,7 @@ def run_pipeline(settings: PipelineSettings, sink: StageSink, previous_run: dict
         )
         sink.stage("delight", status="completed", progress=1.0, message="Reused light cleanup")
     else:
+        require_active()
         sink.stage("delight", status="running", progress=0.0, message="Cleaning input lighting")
 
         def update_delight_stage(progress: float, message: str) -> None:
@@ -552,7 +651,9 @@ def run_pipeline(settings: PipelineSettings, sink: StageSink, previous_run: dict
             "Finished light cleanup in %.1fs",
             time.monotonic() - delight_started_at,
         )
+        require_active()
         save_image(delighted_image, delighted_path)
+        require_active()
         sink.asset(
             "delight",
             kind="image",
@@ -564,6 +665,7 @@ def run_pipeline(settings: PipelineSettings, sink: StageSink, previous_run: dict
 
     reusable_uv_mesh = False
     if stage_can_resume("uv_unwrap", uv_mesh_path):
+        require_active()
         textured_mesh_input = load_mesh_file(uv_mesh_path)
         uv = getattr(getattr(textured_mesh_input, "visual", None), "uv", None)
         reusable_uv_mesh = uv is not None
@@ -581,8 +683,10 @@ def run_pipeline(settings: PipelineSettings, sink: StageSink, previous_run: dict
             logger.warning("Discarding UV mesh without UV coordinates: %s", uv_mesh_path)
 
     if not reusable_uv_mesh:
+        require_active()
         sink.stage("uv_unwrap", status="running", progress=0.0, message="Generating UV unwrap")
         run_uv_wrap_in_subprocess(white_mesh_path, uv_mesh_path, sink)
+        require_active()
         textured_mesh_input = load_mesh_file(uv_mesh_path)
         ensure_mesh_has_uvs(textured_mesh_input, context="Generated UV mesh")
         texture_pipeline.render.load_mesh(textured_mesh_input)
@@ -602,6 +706,7 @@ def run_pipeline(settings: PipelineSettings, sink: StageSink, previous_run: dict
     if stage_can_resume("multiview", normal_sheet_path, position_sheet_path, multiview_sheet_path) and any(
         multiview_dir.glob("*.png")
     ):
+        require_active()
         multiviews = load_image_sequence(multiview_dir, mode="RGB")
         sink.asset(
             "multiview",
@@ -626,6 +731,7 @@ def run_pipeline(settings: PipelineSettings, sink: StageSink, previous_run: dict
         )
         sink.stage("multiview", status="completed", progress=1.0, message="Reused painted views")
     else:
+        require_active()
         sink.stage("multiview", status="running", progress=0.1, message="Rendering geometry guides")
         normal_maps = texture_pipeline.render_normal_multiview(
             selected_camera_elevs,
@@ -636,8 +742,11 @@ def run_pipeline(settings: PipelineSettings, sink: StageSink, previous_run: dict
             selected_camera_elevs,
             selected_camera_azims,
         )
+        require_active()
         save_contact_sheet(normal_maps, normal_sheet_path)
+        require_active()
         save_contact_sheet(position_maps, position_sheet_path)
+        require_active()
         sink.asset(
             "multiview",
             kind="image",
@@ -653,6 +762,7 @@ def run_pipeline(settings: PipelineSettings, sink: StageSink, previous_run: dict
             mime_type="image/png",
         )
 
+        require_active()
         sink.stage("multiview", status="running", progress=0.55, message="Generating painted views")
         camera_info = [
             (((azim // 30) + 9) % 12) // {-20: 1, 0: 1, 20: 1, -90: 3, 90: 3}[elev]
@@ -668,8 +778,11 @@ def run_pipeline(settings: PipelineSettings, sink: StageSink, previous_run: dict
             image.resize((texture_pipeline.config.render_size, texture_pipeline.config.render_size))
             for image in multiviews
         ]
+        require_active()
         save_image_sequence(multiviews, multiview_dir)
+        require_active()
         save_contact_sheet(multiviews, multiview_sheet_path)
+        require_active()
         sink.asset(
             "multiview",
             kind="image",
@@ -680,6 +793,7 @@ def run_pipeline(settings: PipelineSettings, sink: StageSink, previous_run: dict
         sink.stage("multiview", status="completed", progress=1.0, message="Painted views ready")
 
     if stage_can_resume("texture_bake", mask_path, texture_path):
+        require_active()
         sink.asset(
             "texture_bake",
             kind="image",
@@ -699,6 +813,7 @@ def run_pipeline(settings: PipelineSettings, sink: StageSink, previous_run: dict
         textured_mesh = texture_pipeline.render.save_mesh()
         sink.stage("texture_bake", status="completed", progress=1.0, message="Reused baked texture")
     else:
+        require_active()
         sink.stage("texture_bake", status="running", progress=0.2, message="Baking texture")
         texture, mask = texture_pipeline.bake_from_multiview(
             multiviews,
@@ -708,7 +823,9 @@ def run_pipeline(settings: PipelineSettings, sink: StageSink, previous_run: dict
             method=texture_pipeline.config.merge_method,
         )
         mask_np = (mask.squeeze(-1).cpu().numpy() * 255).astype(np.uint8)
+        require_active()
         save_image(Image.fromarray(mask_np, mode="L"), mask_path)
+        require_active()
         sink.asset(
             "texture_bake",
             kind="image",
@@ -717,9 +834,12 @@ def run_pipeline(settings: PipelineSettings, sink: StageSink, previous_run: dict
             mime_type="image/png",
         )
 
+        require_active()
         sink.stage("texture_bake", status="running", progress=0.7, message="Inpainting texture")
         texture = texture_pipeline.texture_inpaint(texture, mask_np)
+        require_active()
         save_tensor_image(texture, texture_path)
+        require_active()
         sink.asset(
             "texture_bake",
             kind="image",
@@ -731,25 +851,69 @@ def run_pipeline(settings: PipelineSettings, sink: StageSink, previous_run: dict
         textured_mesh = texture_pipeline.render.save_mesh()
         sink.stage("texture_bake", status="completed", progress=1.0, message="Texture baked")
 
-    if stage_can_resume("export", settings.output_path):
+    if stage_can_resume("export", settings.output_path, vertex_color_obj_path, textured_obj_zip_path):
+        require_active()
         sink.asset(
             "export",
             kind="model",
             label="Textured Mesh",
             path=settings.output_path,
             mime_type="model/gltf-binary",
+            metadata={"previewable": True, "download_label": "Download GLB"},
+        )
+        sink.asset(
+            "export",
+            kind="model",
+            label="Vertex-Colored OBJ",
+            path=vertex_color_obj_path,
+            mime_type="model/obj",
+            metadata={"previewable": False, "download_label": "Download OBJ"},
+        )
+        sink.asset(
+            "export",
+            kind="model",
+            label="Textured OBJ ZIP",
+            path=textured_obj_zip_path,
+            mime_type="application/zip",
+            metadata={"previewable": False, "download_label": "Download ZIP"},
         )
         sink.stage("export", status="completed", progress=1.0, message="Reused textured GLB")
         return settings.output_path
 
+    require_active()
     sink.stage("export", status="running", progress=0.0, message="Writing textured GLB")
+    require_active()
     textured_mesh.export(settings.output_path)
+    require_active()
+    sink.stage("export", status="running", progress=0.4, message="Writing vertex-colored OBJ")
+    export_vertex_colored_obj(textured_mesh, texture_path, vertex_color_obj_path)
+    require_active()
+    sink.stage("export", status="running", progress=0.7, message="Writing textured OBJ ZIP")
+    export_textured_obj_zip(textured_mesh, texture_path, textured_obj_zip_path)
+    require_active()
     sink.asset(
         "export",
         kind="model",
         label="Textured Mesh",
         path=settings.output_path,
         mime_type="model/gltf-binary",
+        metadata={"previewable": True, "download_label": "Download GLB"},
     )
-    sink.stage("export", status="completed", progress=1.0, message="Textured GLB saved")
+    sink.asset(
+        "export",
+        kind="model",
+        label="Vertex-Colored OBJ",
+        path=vertex_color_obj_path,
+        mime_type="model/obj",
+        metadata={"previewable": False, "download_label": "Download OBJ"},
+    )
+    sink.asset(
+        "export",
+        kind="model",
+        label="Textured OBJ ZIP",
+        path=textured_obj_zip_path,
+        mime_type="application/zip",
+        metadata={"previewable": False, "download_label": "Download ZIP"},
+    )
+    sink.stage("export", status="completed", progress=1.0, message="Textured exports saved")
     return settings.output_path

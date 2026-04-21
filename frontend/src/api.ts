@@ -23,6 +23,16 @@ export async function createRun(file: File): Promise<Run> {
   );
 }
 
+export async function deleteRun(runId: string): Promise<void> {
+  const response = await fetch(`/api/runs/${runId}`, {
+    method: "DELETE",
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `Request failed with ${response.status}`);
+  }
+}
+
 export async function waitForRunsEvent(since: number, signal?: AbortSignal): Promise<RunsEvent> {
   const params = new URLSearchParams({
     since: `${since}`,
