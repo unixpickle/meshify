@@ -71,7 +71,6 @@ class PipelineSettings:
 
 
 _SHAPE_PIPELINE_CACHE: dict[tuple[str, str, str, str, str | None], object] = {}
-_TEXGEN_PIPELINE_CACHE: dict[tuple[str, str, str], object] = {}
 _PIPELINE_LOCK = threading.Lock()
 logger = logging.getLogger(__name__)
 
@@ -344,6 +343,104 @@ def run_uv_wrap_in_subprocess(input_mesh_path: Path, output_mesh_path: Path, sin
         parent_conn.close()
 
 
+def _texture_inpaint_worker(
+    input_mesh_path: str,
+    input_texture_path: str,
+    input_mask_path: str,
+    output_texture_path: str,
+    texture_size: int,
+    result_conn,
+) -> None:
+    try:
+        from hy3dgen.texgen.differentiable_renderer.mesh_render import MeshRender
+
+        mesh = load_mesh_file(Path(input_mesh_path))
+        texture = np.asarray(load_image_file(Path(input_texture_path), "RGB"), dtype=np.float32) / 255.0
+        mask = np.asarray(load_image_file(Path(input_mask_path), "L"), dtype=np.uint8)
+
+        render = MeshRender(
+            default_resolution=texture_size,
+            texture_size=texture_size,
+            device="cpu",
+        )
+        render.load_mesh(mesh)
+        inpainted = render.uv_inpaint(texture, mask)
+        save_image(Image.fromarray(inpainted), Path(output_texture_path))
+        result_conn.send({"status": "ok"})
+    except Exception as exc:  # pragma: no cover - defensive subprocess handling
+        result_conn.send(
+            {
+                "status": "error",
+                "message": str(exc),
+                "traceback": traceback.format_exc(),
+            }
+        )
+        raise
+    finally:
+        result_conn.close()
+
+
+def run_texture_inpaint_in_subprocess(
+    input_mesh_path: Path,
+    input_texture_path: Path,
+    input_mask_path: Path,
+    output_texture_path: Path,
+    texture_size: int,
+    sink: StageSink,
+) -> Path:
+    context = multiprocessing.get_context("spawn")
+    parent_conn, child_conn = context.Pipe(duplex=False)
+    process = context.Process(
+        target=_texture_inpaint_worker,
+        args=(
+            str(input_mesh_path),
+            str(input_texture_path),
+            str(input_mask_path),
+            str(output_texture_path),
+            texture_size,
+            child_conn,
+        ),
+    )
+
+    logger.info("Starting texture inpaint subprocess for %s", input_texture_path)
+    started_at = time.monotonic()
+    process.start()
+    child_conn.close()
+
+    try:
+        sink.stage(
+            "texture_bake",
+            status="running",
+            progress=0.72,
+            message=f"Texture inpaint running in subprocess (pid {process.pid})",
+        )
+        while process.is_alive():
+            process.join(timeout=2.0)
+            if process.is_alive():
+                elapsed = int(time.monotonic() - started_at)
+                sink.stage(
+                    "texture_bake",
+                    status="running",
+                    progress=0.85,
+                    message=f"Texture inpaint running in subprocess for {elapsed}s",
+                )
+
+        process.join()
+        result = parent_conn.recv() if parent_conn.poll() else None
+        if process.exitcode != 0:
+            if isinstance(result, dict) and result.get("status") == "error":
+                raise RuntimeError(
+                    f"Texture inpaint subprocess failed: {result['message']}\n{result['traceback']}"
+                )
+            raise RuntimeError(f"Texture inpaint subprocess exited with code {process.exitcode}")
+        if not output_texture_path.exists():
+            raise RuntimeError("Texture inpaint subprocess finished without writing the texture")
+        logger.info("Finished texture inpaint in %.1fs", time.monotonic() - started_at)
+        return output_texture_path
+    finally:
+        parent_conn.close()
+
+
 def _load_shape_pipeline(
     model_path: str,
     subfolder: str,
@@ -396,19 +493,11 @@ def _load_shape_pipeline(
 def _load_texture_pipeline(model_path: str, subfolder: str, device: str):
     from hy3dgen.texgen import Hunyuan3DPaintPipeline
 
-    cache_key = (model_path, subfolder, device)
-    with _PIPELINE_LOCK:
-        if cache_key in _TEXGEN_PIPELINE_CACHE:
-            return _TEXGEN_PIPELINE_CACHE[cache_key]
-
-    pipeline = Hunyuan3DPaintPipeline.from_pretrained(
+    return Hunyuan3DPaintPipeline.from_pretrained(
         model_path,
         subfolder=subfolder,
         device=device,
     )
-    with _PIPELINE_LOCK:
-        _TEXGEN_PIPELINE_CACHE[cache_key] = pipeline
-    return pipeline
 
 
 class ProgressReporter:
@@ -521,6 +610,7 @@ def run_pipeline(
     multiview_sheet_path = settings.output_path.parent / "painted_views.png"
     multiview_dir = settings.output_path.parent / "painted_views"
     mask_path = settings.output_path.parent / "texture_mask.png"
+    baked_texture_path = settings.output_path.parent / "texture_map_baked.png"
     texture_path = settings.output_path.parent / "texture_map.png"
     vertex_color_obj_path = settings.output_path.parent / "vertex_colors.obj"
     textured_obj_zip_path = settings.output_path.parent / "textured_obj.zip"
@@ -643,10 +733,11 @@ def run_pipeline(
             settings.texgen_delight_steps,
         )
         delight_started_at = time.monotonic()
-        delighted_image = texture_pipeline.models["delight_model"](
+        delighted_image = texture_pipeline.run_delight(
             relight_input,
             progress_callback=update_delight_stage,
         )
+        texture_pipeline.unload_model("delight_model")
         logger.info(
             "Finished light cleanup in %.1fs",
             time.monotonic() - delight_started_at,
@@ -769,11 +860,12 @@ def run_pipeline(
             + {-20: 0, 0: 12, 20: 24, -90: 36, 90: 40}[elev]
             for azim, elev in zip(selected_camera_azims, selected_camera_elevs)
         ]
-        multiviews = texture_pipeline.models["multiview_model"](
+        multiviews = texture_pipeline.run_multiview(
             [delighted_image],
             normal_maps + position_maps,
             camera_info,
         )
+        texture_pipeline.unload_model("multiview_model")
         multiviews = [
             image.resize((texture_pipeline.config.render_size, texture_pipeline.config.render_size))
             for image in multiviews
@@ -836,9 +928,18 @@ def run_pipeline(
 
         require_active()
         sink.stage("texture_bake", status="running", progress=0.7, message="Inpainting texture")
-        texture = texture_pipeline.texture_inpaint(texture, mask_np)
+        save_tensor_image(texture, baked_texture_path)
         require_active()
-        save_tensor_image(texture, texture_path)
+        run_texture_inpaint_in_subprocess(
+            uv_mesh_path,
+            baked_texture_path,
+            mask_path,
+            texture_path,
+            texture_pipeline.config.texture_size,
+            sink,
+        )
+        require_active()
+        texture = load_texture_tensor(texture_path, device)
         require_active()
         sink.asset(
             "texture_bake",

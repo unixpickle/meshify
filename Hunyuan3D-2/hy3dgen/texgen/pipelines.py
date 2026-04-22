@@ -12,7 +12,7 @@
 # fine-tuning enabling code and other elements of the foregoing made publicly available
 # by Tencent in accordance with TENCENT HUNYUAN COMMUNITY LICENSE AGREEMENT.
 
-
+import gc
 import logging
 import numpy as np
 import os
@@ -104,19 +104,57 @@ class Hunyuan3DPaintPipeline:
             texture_size=self.config.texture_size,
             device=self.config.device)
 
-        self.load_models()
-
     def load_models(self):
+        self.get_delight_model()
+        self.get_multiview_model()
+        # self.get_super_model()
+
+    def _clear_memory(self):
+        gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-        # Load model
-        self.models['delight_model'] = Light_Shadow_Remover(self.config)
-        self.models['multiview_model'] = Multiview_Diffusion_Net(self.config)
-        # self.models['super_model'] = Image_Super_Net(self.config)
+        if self.config.device == "mps" and hasattr(torch, "mps"):
+            torch.mps.empty_cache()
+
+    def _get_or_load_model(self, model_name):
+        if model_name not in self.models:
+            self._clear_memory()
+            if model_name == 'delight_model':
+                self.models[model_name] = Light_Shadow_Remover(self.config)
+            elif model_name == 'multiview_model':
+                self.models[model_name] = Multiview_Diffusion_Net(self.config)
+            elif model_name == 'super_model':
+                self.models[model_name] = Image_Super_Net(self.config)
+            else:
+                raise KeyError(f"Unknown model {model_name}")
+        return self.models[model_name]
+
+    def get_delight_model(self):
+        return self._get_or_load_model('delight_model')
+
+    def get_multiview_model(self):
+        return self._get_or_load_model('multiview_model')
+
+    def unload_model(self, model_name):
+        model = self.models.pop(model_name, None)
+        if model is None:
+            return
+        del model
+        self._clear_memory()
+
+    def unload_all_models(self):
+        for model_name in list(self.models.keys()):
+            self.unload_model(model_name)
 
     def enable_model_cpu_offload(self, gpu_id: Optional[int] = None, device: Union[torch.device, str] = "cuda"):
-        self.models['delight_model'].pipeline.enable_model_cpu_offload(gpu_id=gpu_id, device=device)
-        self.models['multiview_model'].pipeline.enable_model_cpu_offload(gpu_id=gpu_id, device=device)
+        self.get_delight_model().pipeline.enable_model_cpu_offload(gpu_id=gpu_id, device=device)
+        self.get_multiview_model().pipeline.enable_model_cpu_offload(gpu_id=gpu_id, device=device)
+
+    def run_delight(self, image, progress_callback=None):
+        return self.get_delight_model()(image, progress_callback=progress_callback)
+
+    def run_multiview(self, input_images, control_images, camera_info):
+        return self.get_multiview_model()(input_images, control_images, camera_info)
 
     def render_normal_multiview(self, camera_elevs, camera_azims, use_abs_coor=True):
         normal_maps = []
@@ -213,7 +251,8 @@ class Hunyuan3DPaintPipeline:
             
         images_prompt = [self.recenter_image(image_prompt) for image_prompt in images_prompt]
 
-        images_prompt = [self.models['delight_model'](image_prompt) for image_prompt in images_prompt]
+        images_prompt = [self.run_delight(image_prompt) for image_prompt in images_prompt]
+        self.unload_model('delight_model')
 
         mesh = mesh_uv_wrap(mesh)
 
@@ -230,7 +269,8 @@ class Hunyuan3DPaintPipeline:
         camera_info = [(((azim // 30) + 9) % 12) // {-20: 1, 0: 1, 20: 1, -90: 3, 90: 3}[
             elev] + {-20: 0, 0: 12, 20: 24, -90: 36, 90: 40}[elev] for azim, elev in
                        zip(selected_camera_azims, selected_camera_elevs)]
-        multiviews = self.models['multiview_model'](images_prompt, normal_maps + position_maps, camera_info)
+        multiviews = self.run_multiview(images_prompt, normal_maps + position_maps, camera_info)
+        self.unload_model('multiview_model')
 
         for i in range(len(multiviews)):
             # multiviews[i] = self.models['super_model'](multiviews[i])
