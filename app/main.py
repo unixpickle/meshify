@@ -38,6 +38,11 @@ def startup() -> None:
     job_manager.start()
 
 
+@app.on_event("shutdown")
+def shutdown() -> None:
+    job_manager.stop()
+
+
 app.mount("/files", StaticFiles(directory=config.STORAGE_DIR), name="files")
 
 

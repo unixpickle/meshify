@@ -2,12 +2,10 @@ from __future__ import annotations
 
 import contextlib
 import logging
-import multiprocessing
 import os
 import shutil
 import threading
 import time
-import traceback
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -281,166 +279,48 @@ def export_textured_obj_zip(mesh, texture_path: Path, destination: Path) -> None
             archive.writestr(name, contents)
 
 
-def _uv_wrap_worker(input_mesh_path: str, output_mesh_path: str, result_conn) -> None:
-    try:
-        from hy3dgen.texgen.utils.uv_warp_utils import mesh_uv_wrap
+def run_uv_wrap(input_mesh_path: Path, output_mesh_path: Path) -> Path:
+    from hy3dgen.texgen.utils.uv_warp_utils import mesh_uv_wrap
 
-        mesh = load_mesh_file(Path(input_mesh_path))
-        wrapped_mesh = mesh_uv_wrap(mesh)
-        wrapped_mesh = prepare_uv_mesh_for_export(wrapped_mesh)
-        wrapped_mesh.export(output_mesh_path)
-        result_conn.send({"status": "ok"})
-    except Exception as exc:  # pragma: no cover - defensive subprocess handling
-        result_conn.send(
-            {
-                "status": "error",
-                "message": str(exc),
-                "traceback": traceback.format_exc(),
-            }
-        )
-        raise
-    finally:
-        result_conn.close()
-
-
-def run_uv_wrap_in_subprocess(input_mesh_path: Path, output_mesh_path: Path, sink: StageSink) -> Path:
-    context = multiprocessing.get_context("spawn")
-    parent_conn, child_conn = context.Pipe(duplex=False)
-    process = context.Process(
-        target=_uv_wrap_worker,
-        args=(str(input_mesh_path), str(output_mesh_path), child_conn),
-    )
-
-    logger.info("Starting UV unwrap subprocess for %s", input_mesh_path)
+    logger.info("Starting UV unwrap for %s", input_mesh_path)
     started_at = time.monotonic()
-    process.start()
-    child_conn.close()
-
-    try:
-        sink.stage("uv_unwrap", status="running", progress=0.1, message=f"UV unwrap running in subprocess (pid {process.pid})")
-        while process.is_alive():
-            process.join(timeout=2.0)
-            if process.is_alive():
-                elapsed = int(time.monotonic() - started_at)
-                sink.stage(
-                    "uv_unwrap",
-                    status="running",
-                    progress=0.5,
-                    message=f"UV unwrap running in subprocess for {elapsed}s",
-                )
-
-        process.join()
-        result = parent_conn.recv() if parent_conn.poll() else None
-        if process.exitcode != 0:
-            if isinstance(result, dict) and result.get("status") == "error":
-                raise RuntimeError(
-                    f"UV unwrap subprocess failed: {result['message']}\n{result['traceback']}"
-                )
-            raise RuntimeError(f"UV unwrap subprocess exited with code {process.exitcode}")
-        if not output_mesh_path.exists():
-            raise RuntimeError("UV unwrap subprocess finished without writing the UV mesh")
-        logger.info("Finished UV unwrap in %.1fs", time.monotonic() - started_at)
-        return output_mesh_path
-    finally:
-        parent_conn.close()
+    mesh = load_mesh_file(input_mesh_path)
+    wrapped_mesh = mesh_uv_wrap(mesh)
+    wrapped_mesh = prepare_uv_mesh_for_export(wrapped_mesh)
+    wrapped_mesh.export(output_mesh_path)
+    if not output_mesh_path.exists():
+        raise RuntimeError("UV unwrap finished without writing the UV mesh")
+    logger.info("Finished UV unwrap in %.1fs", time.monotonic() - started_at)
+    return output_mesh_path
 
 
-def _texture_inpaint_worker(
-    input_mesh_path: str,
-    input_texture_path: str,
-    input_mask_path: str,
-    output_texture_path: str,
-    texture_size: int,
-    result_conn,
-) -> None:
-    try:
-        from hy3dgen.texgen.differentiable_renderer.mesh_render import MeshRender
-
-        mesh = load_mesh_file(Path(input_mesh_path))
-        texture = np.asarray(load_image_file(Path(input_texture_path), "RGB"), dtype=np.float32) / 255.0
-        mask = np.asarray(load_image_file(Path(input_mask_path), "L"), dtype=np.uint8)
-
-        render = MeshRender(
-            default_resolution=texture_size,
-            texture_size=texture_size,
-            device="cpu",
-        )
-        render.load_mesh(mesh)
-        inpainted = render.uv_inpaint(texture, mask)
-        save_image(Image.fromarray(inpainted), Path(output_texture_path))
-        result_conn.send({"status": "ok"})
-    except Exception as exc:  # pragma: no cover - defensive subprocess handling
-        result_conn.send(
-            {
-                "status": "error",
-                "message": str(exc),
-                "traceback": traceback.format_exc(),
-            }
-        )
-        raise
-    finally:
-        result_conn.close()
-
-
-def run_texture_inpaint_in_subprocess(
+def run_texture_inpaint(
     input_mesh_path: Path,
     input_texture_path: Path,
     input_mask_path: Path,
     output_texture_path: Path,
     texture_size: int,
-    sink: StageSink,
 ) -> Path:
-    context = multiprocessing.get_context("spawn")
-    parent_conn, child_conn = context.Pipe(duplex=False)
-    process = context.Process(
-        target=_texture_inpaint_worker,
-        args=(
-            str(input_mesh_path),
-            str(input_texture_path),
-            str(input_mask_path),
-            str(output_texture_path),
-            texture_size,
-            child_conn,
-        ),
-    )
+    from hy3dgen.texgen.differentiable_renderer.mesh_render import MeshRender
 
-    logger.info("Starting texture inpaint subprocess for %s", input_texture_path)
+    logger.info("Starting texture inpaint for %s", input_texture_path)
     started_at = time.monotonic()
-    process.start()
-    child_conn.close()
+    mesh = load_mesh_file(input_mesh_path)
+    texture = np.asarray(load_image_file(input_texture_path, "RGB"), dtype=np.float32) / 255.0
+    mask = np.asarray(load_image_file(input_mask_path, "L"), dtype=np.uint8)
 
-    try:
-        sink.stage(
-            "texture_bake",
-            status="running",
-            progress=0.72,
-            message=f"Texture inpaint running in subprocess (pid {process.pid})",
-        )
-        while process.is_alive():
-            process.join(timeout=2.0)
-            if process.is_alive():
-                elapsed = int(time.monotonic() - started_at)
-                sink.stage(
-                    "texture_bake",
-                    status="running",
-                    progress=0.85,
-                    message=f"Texture inpaint running in subprocess for {elapsed}s",
-                )
-
-        process.join()
-        result = parent_conn.recv() if parent_conn.poll() else None
-        if process.exitcode != 0:
-            if isinstance(result, dict) and result.get("status") == "error":
-                raise RuntimeError(
-                    f"Texture inpaint subprocess failed: {result['message']}\n{result['traceback']}"
-                )
-            raise RuntimeError(f"Texture inpaint subprocess exited with code {process.exitcode}")
-        if not output_texture_path.exists():
-            raise RuntimeError("Texture inpaint subprocess finished without writing the texture")
-        logger.info("Finished texture inpaint in %.1fs", time.monotonic() - started_at)
-        return output_texture_path
-    finally:
-        parent_conn.close()
+    render = MeshRender(
+        default_resolution=texture_size,
+        texture_size=texture_size,
+        device="cpu",
+    )
+    render.load_mesh(mesh)
+    inpainted = render.uv_inpaint(texture, mask)
+    save_image(Image.fromarray(inpainted), output_texture_path)
+    if not output_texture_path.exists():
+        raise RuntimeError("Texture inpaint finished without writing the texture")
+    logger.info("Finished texture inpaint in %.1fs", time.monotonic() - started_at)
+    return output_texture_path
 
 
 def _load_shape_pipeline(
@@ -827,7 +707,7 @@ def run_pipeline(
     if not reusable_uv_mesh:
         require_active()
         sink.stage("uv_unwrap", status="running", progress=0.0, message="Generating UV unwrap")
-        run_uv_wrap_in_subprocess(white_mesh_path, uv_mesh_path, sink)
+        run_uv_wrap(white_mesh_path, uv_mesh_path)
         require_active()
         textured_mesh_input = load_mesh_file(uv_mesh_path)
         ensure_mesh_has_uvs(textured_mesh_input, context="Generated UV mesh")
@@ -981,13 +861,12 @@ def run_pipeline(
         sink.stage("texture_bake", status="running", progress=0.7, message="Inpainting texture")
         save_tensor_image(texture, baked_texture_path)
         require_active()
-        run_texture_inpaint_in_subprocess(
+        run_texture_inpaint(
             uv_mesh_path,
             baked_texture_path,
             mask_path,
             texture_path,
             texture_pipeline.config.texture_size,
-            sink,
         )
         require_active()
         texture = load_texture_tensor(texture_path, device)
