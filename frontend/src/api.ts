@@ -12,9 +12,10 @@ export async function listRuns(): Promise<Run[]> {
   return parseJson<Run[]>(await fetch("/api/runs"));
 }
 
-export async function createRun(file: File): Promise<Run> {
+export async function createRun(file: File, disablePaint = false): Promise<Run> {
   const form = new FormData();
   form.append("file", file);
+  form.append("disable_paint", disablePaint ? "true" : "false");
   return parseJson<Run>(
     await fetch("/api/runs", {
       method: "POST",

@@ -195,6 +195,7 @@ class JobManager:
             image_path=config.STORAGE_DIR / upload_asset["storage_path"],
             output_path=output_path,
             remove_background=not run["settings"].get("keep_background", False),
+            disable_paint=bool(run["settings"].get("disable_paint", False)),
         )
         store.update_run(
             run_id,

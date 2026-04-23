@@ -4,6 +4,7 @@ import contextlib
 import logging
 import multiprocessing
 import os
+import shutil
 import threading
 import time
 import traceback
@@ -56,6 +57,7 @@ class PipelineSettings:
     image_path: Path
     output_path: Path
     remove_background: bool = True
+    disable_paint: bool = False
     model_path: str = config.MODEL_PATH
     subfolder: str = config.MODEL_SUBFOLDER
     texgen_model_path: str = config.TEXGEN_MODEL_PATH
@@ -615,6 +617,9 @@ def run_pipeline(
     vertex_color_obj_path = settings.output_path.parent / "vertex_colors.obj"
     textured_obj_zip_path = settings.output_path.parent / "textured_obj.zip"
 
+    def complete_stage(stage_key: str, message: str) -> None:
+        sink.stage(stage_key, status="completed", progress=1.0, message=message)
+
     if stage_can_resume("preprocess", processed_path):
         require_active()
         prepared_image = load_image_file(processed_path, "RGBA")
@@ -696,6 +701,52 @@ def run_pipeline(
             mime_type="model/gltf-binary",
         )
         sink.stage("mesh_export", status="completed", progress=1.0, message="White mesh saved")
+
+    if settings.disable_paint:
+        if stage_can_resume("export", settings.output_path):
+            require_active()
+            sink.asset(
+                "export",
+                kind="model",
+                label="Geometry Mesh",
+                path=settings.output_path,
+                mime_type="model/gltf-binary",
+                metadata={"previewable": True, "download_label": "Download GLB"},
+            )
+            for stage_key, message in (
+                ("texture_model_load", "Skipped paint model load for geometry-only run"),
+                ("delight", "Skipped light cleanup for geometry-only run"),
+                ("uv_unwrap", "Skipped UV unwrap for geometry-only run"),
+                ("multiview", "Skipped multiview paint for geometry-only run"),
+                ("texture_bake", "Skipped texture bake for geometry-only run"),
+            ):
+                complete_stage(stage_key, message)
+            complete_stage("export", "Reused geometry-only GLB")
+            return settings.output_path
+
+        require_active()
+        sink.stage("export", status="running", progress=0.0, message="Writing geometry-only GLB")
+        require_active()
+        shutil.copyfile(white_mesh_path, settings.output_path)
+        require_active()
+        sink.asset(
+            "export",
+            kind="model",
+            label="Geometry Mesh",
+            path=settings.output_path,
+            mime_type="model/gltf-binary",
+            metadata={"previewable": True, "download_label": "Download GLB"},
+        )
+        for stage_key, message in (
+            ("texture_model_load", "Skipped paint model load for geometry-only run"),
+            ("delight", "Skipped light cleanup for geometry-only run"),
+            ("uv_unwrap", "Skipped UV unwrap for geometry-only run"),
+            ("multiview", "Skipped multiview paint for geometry-only run"),
+            ("texture_bake", "Skipped texture bake for geometry-only run"),
+        ):
+            complete_stage(stage_key, message)
+        complete_stage("export", "Geometry-only GLB saved")
+        return settings.output_path
 
     require_active()
     sink.stage("texture_model_load", status="running", progress=0.0, message="Loading paint models")

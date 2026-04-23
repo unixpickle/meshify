@@ -6,7 +6,7 @@ import mimetypes
 import shutil
 from pathlib import Path
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -77,12 +77,21 @@ async def wait_for_events(since: int = 0, timeout: float = 25.0) -> dict:
 
 
 @app.post("/api/runs")
-async def create_run(file: UploadFile = File(...)) -> dict:
+async def create_run(
+    file: UploadFile = File(...),
+    disable_paint: bool = Form(False),
+) -> dict:
     if not file.filename:
         raise HTTPException(status_code=400, detail="Missing filename")
 
     config.ensure_directories()
-    run_id = store.create_run(file.filename, {"keep_background": False})
+    run_id = store.create_run(
+        file.filename,
+        {
+            "keep_background": False,
+            "disable_paint": disable_paint,
+        },
+    )
     store.initialize_run_stages(run_id)
 
     upload_dir = config.UPLOADS_DIR / run_id

@@ -42,6 +42,7 @@ const state = {
   deletingRun: false,
   uploadError: "",
   selectedFile: null as File | null,
+  disablePaint: false,
   viewerState: {} as Record<string, ViewerState>,
   loadedModelAssets: {} as Record<string, true>,
   lastDetailRunId: "",
@@ -63,6 +64,7 @@ const refs = {
   completedRuns: null as HTMLSpanElement | null,
   uploadForm: null as HTMLFormElement | null,
   fileInput: null as HTMLInputElement | null,
+  disablePaintInput: null as HTMLInputElement | null,
   filePickerName: null as HTMLSpanElement | null,
   submitButton: null as HTMLButtonElement | null,
   refreshButton: null as HTMLButtonElement | null,
@@ -358,6 +360,13 @@ function createShell(): void {
                 <span class="file-picker-button" data-role="file-picker-button">Browse</span>
                 <span class="file-picker-name" data-role="file-picker-name">Choose an image</span>
               </label>
+              <label class="toggle-row" for="disable-paint-input">
+                <span class="toggle-copy">
+                  <strong>Geometry only</strong>
+                  <span class="muted">Skip the paint pipeline and stop after generating the mesh.</span>
+                </span>
+                <input type="checkbox" id="disable-paint-input" data-role="disable-paint-input" />
+              </label>
               <div class="upload-actions">
                 <button class="primary" type="submit" data-role="submit-button">Start Pipeline</button>
                 <button class="secondary" type="button" data-role="refresh-button">Refresh</button>
@@ -385,6 +394,7 @@ function createShell(): void {
   refs.completedRuns = app.querySelector('[data-role="completed-runs"]');
   refs.uploadForm = app.querySelector("#upload-form");
   refs.fileInput = app.querySelector("#file-input");
+  refs.disablePaintInput = app.querySelector('[data-role="disable-paint-input"]');
   refs.filePickerName = app.querySelector('[data-role="file-picker-name"]');
   refs.submitButton = app.querySelector('[data-role="submit-button"]');
   refs.refreshButton = app.querySelector('[data-role="refresh-button"]');
@@ -395,6 +405,7 @@ function createShell(): void {
 
   refs.uploadForm?.addEventListener("submit", onUploadSubmit);
   refs.fileInput?.addEventListener("change", onFileInputChange);
+  refs.disablePaintInput?.addEventListener("change", onDisablePaintChange);
   refs.refreshButton?.addEventListener("click", () => {
     void reloadRunsNow();
     restartLongPolling();
@@ -422,6 +433,10 @@ function syncViewMode(): void {
 function syncUploadForm(): void {
   if (!refs.fileInput || !refs.filePickerName || !refs.submitButton || !refs.uploadError) return;
   refs.fileInput.disabled = state.uploading;
+  if (refs.disablePaintInput) {
+    refs.disablePaintInput.disabled = state.uploading;
+    refs.disablePaintInput.checked = state.disablePaint;
+  }
   refs.filePickerName.textContent = state.selectedFile?.name ?? "Choose an image";
   refs.submitButton.disabled = state.uploading;
   refs.submitButton.textContent = state.uploading ? "Uploading..." : "Start Pipeline";
@@ -965,7 +980,11 @@ function syncDetail(): void {
   const detailUpdated = refs.detailHost?.querySelector<HTMLElement>('[data-role="detail-updated"]');
   if (detailUpdated) detailUpdated.textContent = `Updated ${formatTime(run.updated_at)}`;
   const detailName = refs.detailHost?.querySelector<HTMLElement>('[data-role="detail-name"]');
-  if (detailName) detailName.textContent = run.original_name;
+  if (detailName) {
+    detailName.textContent = run.settings.disable_paint === true
+      ? `${run.original_name} (geometry only)`
+      : run.original_name;
+  }
   const detailMessage = refs.detailHost?.querySelector<HTMLElement>('[data-role="detail-message"]');
   if (detailMessage) detailMessage.textContent = run.message ?? "Queued";
   const detailProgress = refs.detailHost?.querySelector<HTMLElement>('[data-role="detail-progress"]');
@@ -1020,10 +1039,14 @@ async function onUploadSubmit(event: Event): Promise<void> {
   syncUI();
 
   try {
-    upsertRun(await createRun(file));
+    upsertRun(await createRun(file, state.disablePaint));
     state.selectedFile = null;
+    state.disablePaint = false;
     if (refs.fileInput) {
       refs.fileInput.value = "";
+    }
+    if (refs.disablePaintInput) {
+      refs.disablePaintInput.checked = false;
     }
   } catch (error) {
     state.uploadError = error instanceof Error ? error.message : "Upload failed";
@@ -1070,6 +1093,12 @@ function onFileInputChange(event: Event): void {
   const input = event.currentTarget as HTMLInputElement | null;
   state.selectedFile = input?.files?.[0] ?? null;
   state.uploadError = "";
+  syncUploadForm();
+}
+
+function onDisablePaintChange(event: Event): void {
+  const input = event.currentTarget as HTMLInputElement | null;
+  state.disablePaint = input?.checked ?? false;
   syncUploadForm();
 }
 
