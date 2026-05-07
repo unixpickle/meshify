@@ -28,8 +28,35 @@ STAGE_DEFINITIONS: list[tuple[str, str]] = [
     ("texture_bake", "Texture Bake"),
     ("export", "Textured Mesh Export"),
 ]
+GEOMETRY_ONLY_STAGE_DEFINITIONS: list[tuple[str, str]] = [
+    ("uploaded", "Uploaded"),
+    ("preprocess", "Background Removal"),
+    ("model_load", "Model Load"),
+    ("diffusion", "Diffusion Sampling"),
+    ("volume_decode", "Volume Decode"),
+    ("mesh_export", "White Mesh Export"),
+    ("export", "Geometry Mesh Export"),
+]
 STAGE_ORDER = {key: index for index, (key, _) in enumerate(STAGE_DEFINITIONS, start=1)}
 STAGE_LABELS = {key: label for key, label in STAGE_DEFINITIONS}
+STAGE_LABELS.update({key: label for key, label in GEOMETRY_ONLY_STAGE_DEFINITIONS})
+
+
+def stage_definitions_for_settings(settings: dict[str, Any]) -> list[tuple[str, str]]:
+    if settings.get("disable_paint"):
+        return GEOMETRY_ONLY_STAGE_DEFINITIONS
+    return STAGE_DEFINITIONS
+
+
+def stage_order_for_settings(settings: dict[str, Any]) -> dict[str, int]:
+    return {
+        key: index
+        for index, (key, _) in enumerate(stage_definitions_for_settings(settings), start=1)
+    }
+
+
+def stage_count_for_settings(settings: dict[str, Any]) -> int:
+    return len(stage_definitions_for_settings(settings))
 
 
 def utc_now() -> str:
@@ -60,7 +87,11 @@ def create_run(original_name: str, settings: dict[str, Any]) -> str:
 def initialize_run_stages(run_id: str) -> None:
     now = utc_now()
     with DB_LOCK, get_connection() as connection:
-        for key, label in STAGE_DEFINITIONS:
+        run_row = connection.execute("SELECT settings_json FROM runs WHERE id = ?", (run_id,)).fetchone()
+        if run_row is None:
+            raise KeyError(f"Run {run_id} not found")
+        settings = json.loads(run_row["settings_json"])
+        for order, (key, label) in enumerate(stage_definitions_for_settings(settings), start=1):
             connection.execute(
                 """
                 INSERT OR IGNORE INTO stages (
@@ -68,7 +99,7 @@ def initialize_run_stages(run_id: str) -> None:
                     message, started_at, updated_at, completed_at
                 ) VALUES (?, ?, ?, ?, 'pending', 0, NULL, NULL, ?, NULL)
                 """,
-                (run_id, key, label, STAGE_ORDER[key], now),
+                (run_id, key, label, order, now),
             )
     event_broker.publish("stages.initialized", run_id)
 
@@ -131,9 +162,16 @@ def upsert_stage(
     completed: bool = False,
 ) -> None:
     now = utc_now()
-    label = STAGE_LABELS[stage_key]
-    order = STAGE_ORDER[stage_key]
     with DB_LOCK, get_connection() as connection:
+        run_row = connection.execute("SELECT settings_json FROM runs WHERE id = ?", (run_id,)).fetchone()
+        if run_row is None:
+            raise KeyError(f"Run {run_id} not found")
+        settings = json.loads(run_row["settings_json"])
+        active_stages = stage_definitions_for_settings(settings)
+        active_labels = {key: label for key, label in active_stages}
+        active_order = {key: index for index, (key, _) in enumerate(active_stages, start=1)}
+        label = active_labels.get(stage_key, STAGE_LABELS[stage_key])
+        order = active_order.get(stage_key, STAGE_ORDER[stage_key])
         existing = connection.execute(
             "SELECT * FROM stages WHERE run_id = ? AND stage_key = ?",
             (run_id, stage_key),
@@ -287,7 +325,18 @@ def load_run(run_id: str, *, include_deleting: bool = False) -> dict[str, Any] |
 
     run = _row_to_dict(run_row)
     run["settings"] = json.loads(run.pop("settings_json"))
-    run["stages"] = [_row_to_dict(row) for row in stage_rows]
+    active_stages = stage_definitions_for_settings(run["settings"])
+    active_stage_keys = {key for key, _ in active_stages}
+    active_labels = {key: label for key, label in active_stages}
+    active_order = {key: index for index, (key, _) in enumerate(active_stages, start=1)}
+    run["stages"] = []
+    for row in stage_rows:
+        if row["stage_key"] not in active_stage_keys:
+            continue
+        stage = _row_to_dict(row)
+        stage["stage_label"] = active_labels[stage["stage_key"]]
+        stage["stage_order"] = active_order[stage["stage_key"]]
+        run["stages"].append(stage)
     run["assets"] = []
     deduped_assets: dict[tuple[str, str], dict[str, Any]] = {}
     for row in asset_rows:

@@ -105,6 +105,10 @@ function stageClass(stage: Stage, currentStage: string): string {
   return "stage-card";
 }
 
+function runIsGeometryOnly(run: Run): boolean {
+  return run.settings.disable_paint === true;
+}
+
 type AssetGroup = {
   id: string;
   stage: Stage;
@@ -587,12 +591,12 @@ function createDetailShell(): void {
       <section class="detail-columns">
         <div class="panel">
           <h2>Pipeline Stages</h2>
-          <p class="muted">Live stage state is read from SQLite-backed progress records.</p>
+          <p class="muted" data-role="stage-panel-copy">Live stage state is read from SQLite-backed progress records.</p>
           <div class="stage-list" data-role="stage-list"></div>
         </div>
         <div class="panel">
           <h2>Stage Outputs</h2>
-          <p class="muted">Each stage can publish images or meshes, including paint guides, texture maps, the white mesh, and the final textured GLB.</p>
+          <p class="muted" data-role="outputs-panel-copy">Each stage can publish images or meshes, including paint guides, texture maps, the white mesh, and the final textured GLB.</p>
           <div data-role="asset-groups-host"></div>
         </div>
       </section>
@@ -989,6 +993,18 @@ function syncDetail(): void {
   if (detailMessage) detailMessage.textContent = run.message ?? "Queued";
   const detailProgress = refs.detailHost?.querySelector<HTMLElement>('[data-role="detail-progress"]');
   if (detailProgress) detailProgress.style.width = formatPercent(run.progress);
+  const stagePanelCopy = refs.detailHost?.querySelector<HTMLElement>('[data-role="stage-panel-copy"]');
+  if (stagePanelCopy) {
+    stagePanelCopy.textContent = runIsGeometryOnly(run)
+      ? "This geometry-only run stops after the mesh export."
+      : "Live stage state is read from SQLite-backed progress records.";
+  }
+  const outputsPanelCopy = refs.detailHost?.querySelector<HTMLElement>('[data-role="outputs-panel-copy"]');
+  if (outputsPanelCopy) {
+    outputsPanelCopy.textContent = runIsGeometryOnly(run)
+      ? "Outputs are limited to the source images, white mesh, and final untextured GLB."
+      : "Each stage can publish images or meshes, including paint guides, texture maps, the white mesh, and the final textured GLB.";
+  }
   const deleteRunButton = refs.detailHost?.querySelector<HTMLButtonElement>('[data-role="delete-run-button"]');
   if (deleteRunButton) {
     deleteRunButton.disabled = state.deletingRun;

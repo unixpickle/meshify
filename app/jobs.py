@@ -22,6 +22,16 @@ class DatabaseEventSink:
         self._last_logged_progress: dict[str, int] = {}
         self._last_logged_message: dict[str, str | None] = {}
         self._last_logged_status: dict[str, str] = {}
+        self._stage_order: dict[str, int] = {}
+        self._stage_count = len(store.STAGE_DEFINITIONS)
+
+    def _refresh_stage_plan(self) -> None:
+        if self._stage_order:
+            return
+        run = store.load_run(self.run_id, include_deleting=True)
+        settings = run["settings"] if run is not None else {}
+        self._stage_order = store.stage_order_for_settings(settings)
+        self._stage_count = store.stage_count_for_settings(settings)
 
     def stage(
         self,
@@ -31,9 +41,9 @@ class DatabaseEventSink:
         progress: float,
         message: str | None = None,
     ) -> None:
-        stage_index = store.STAGE_ORDER[stage_key]
-        stage_count = len(store.STAGE_DEFINITIONS)
-        overall_progress = min(((stage_index - 1) + progress) / stage_count, 1.0)
+        self._refresh_stage_plan()
+        stage_index = self._stage_order.get(stage_key, store.STAGE_ORDER[stage_key])
+        overall_progress = min(((stage_index - 1) + progress) / self._stage_count, 1.0)
         store.upsert_stage(
             self.run_id,
             stage_key,
@@ -302,7 +312,7 @@ class JobManager:
         if payload is None:
             return
         if not recovered:
-            uploaded_progress = 1 / len(store.STAGE_DEFINITIONS)
+            uploaded_progress = 1 / store.stage_count_for_settings(payload["run_settings"])
             store.update_run(
                 run_id,
                 status="queued",
@@ -339,16 +349,18 @@ class JobManager:
 
         output_dir = config.RUNS_DIR / run_id
         output_dir.mkdir(parents=True, exist_ok=True)
-        output_path = output_dir / "textured_mesh.glb"
+        disable_paint = bool(run["settings"].get("disable_paint", False))
+        output_path = output_dir / ("geometry_mesh.glb" if disable_paint else "textured_mesh.glb")
         settings = PipelineSettings(
             image_path=config.STORAGE_DIR / upload_asset["storage_path"],
             output_path=output_path,
             remove_background=not run["settings"].get("keep_background", False),
-            disable_paint=bool(run["settings"].get("disable_paint", False)),
+            disable_paint=disable_paint,
         )
         return {
             "type": "enqueue_run",
             "run_id": run_id,
+            "run_settings": run["settings"],
             "settings": _serialize_settings(settings),
             "previous_run": run,
             "current_stage": run["current_stage"],

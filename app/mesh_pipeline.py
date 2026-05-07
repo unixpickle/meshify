@@ -593,14 +593,6 @@ def run_pipeline(
                 mime_type="model/gltf-binary",
                 metadata={"previewable": True, "download_label": "Download GLB"},
             )
-            for stage_key, message in (
-                ("texture_model_load", "Skipped paint model load for geometry-only run"),
-                ("delight", "Skipped light cleanup for geometry-only run"),
-                ("uv_unwrap", "Skipped UV unwrap for geometry-only run"),
-                ("multiview", "Skipped multiview paint for geometry-only run"),
-                ("texture_bake", "Skipped texture bake for geometry-only run"),
-            ):
-                complete_stage(stage_key, message)
             complete_stage("export", "Reused geometry-only GLB")
             return settings.output_path
 
@@ -617,14 +609,6 @@ def run_pipeline(
             mime_type="model/gltf-binary",
             metadata={"previewable": True, "download_label": "Download GLB"},
         )
-        for stage_key, message in (
-            ("texture_model_load", "Skipped paint model load for geometry-only run"),
-            ("delight", "Skipped light cleanup for geometry-only run"),
-            ("uv_unwrap", "Skipped UV unwrap for geometry-only run"),
-            ("multiview", "Skipped multiview paint for geometry-only run"),
-            ("texture_bake", "Skipped texture bake for geometry-only run"),
-        ):
-            complete_stage(stage_key, message)
         complete_stage("export", "Geometry-only GLB saved")
         return settings.output_path
 
